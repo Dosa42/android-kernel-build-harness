@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -22,6 +24,27 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(profile["features"]["selinux"]["mode"], "forced-persistent-permissive")
         self.assertTrue(profile["features"]["mt7612u_backport"]["enabled"])
         self.assertTrue(profile["features"]["kernelsu"]["enabled"])
+
+    def test_explicit_toolchain_path_precedes_other_clang_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "clang"
+            selected = root / "clang-r383902b/bin"
+            newer = root / "clang-r999999/bin"
+            selected.mkdir(parents=True)
+            newer.mkdir(parents=True)
+            (selected / "clang").write_text("", encoding="utf-8")
+            (newer / "clang").write_text("", encoding="utf-8")
+            env, prefixes = kernel_harness.build_environment(
+                {"clang": root},
+                [
+                    {
+                        "name": "clang",
+                        "path_prepend_globs": ["clang-r383902*/bin"],
+                    }
+                ],
+            )
+            self.assertEqual(Path(prefixes[0]), selected)
+            self.assertEqual(Path(env["PATH"].split(os.pathsep)[0]), selected)
 
 
 if __name__ == "__main__":
