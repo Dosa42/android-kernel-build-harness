@@ -1,0 +1,38 @@
+name: Validate kernel harness
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out harness
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile Python sources
+        run: python3 -m compileall -q scripts tests
+
+      - name: Validate all profiles
+        run: |
+          set -euo pipefail
+          for profile in profiles/*.json; do
+            python3 scripts/kernel_harness.py validate-profile --profile "$profile"
+          done
+
+      - name: Run harness tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Verify clean text patches
+        run: git diff --check
