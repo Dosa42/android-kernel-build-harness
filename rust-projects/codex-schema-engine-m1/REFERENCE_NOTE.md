@@ -1,0 +1,1 @@
+Implementation reference: the previously inspected Termux-Agent-AI-Codex-Groq-STT-V5.2 source provided the working ChatGPT OAuth + PKCE and direct Codex Responses flow. No unrelated Termux/Groq/agent features were copied into this milestone.
