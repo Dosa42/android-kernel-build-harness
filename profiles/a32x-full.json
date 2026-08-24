@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "id": "a32x-full",
+  "description": "Samsung A32x reference build: KernelSU v0.9.5, full NetHunter configuration, built-in ALFA AWUS036ACM/MT7612U, and SELinux permanently forced permissive while SELinux remains enabled.",
+  "source": {
+    "repository": "https://github.com/ASKSAP/android_kernel_samsung_a32x.git",
+    "ref": "A326BXXU1AUA5",
+    "recursive": true,
+    "depth": 1
+  },
+  "kernel": {
+    "arch": "arm64",
+    "defconfig": "a32x_defconfig",
+    "out_dir": "out",
+    "make_targets": []
+  },
+  "toolchains": [
+    {
+      "name": "clang",
+      "repository": "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86",
+      "ref": "android-r-beta-2",
+      "recursive": true,
+      "depth": 1
+    },
+    {
+      "name": "gcc64",
+      "repository": "https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9",
+      "ref": "android-11.0.0_r1",
+      "recursive": true,
+      "depth": 1
+    }
+  ],
+  "make": {
+    "params": {
+      "ARCH": "arm64",
+      "CROSS_COMPILE": "{toolchain:gcc64}/bin/aarch64-linux-android-",
+      "CLANG_TRIPLE": "aarch64-linux-gnu-",
+      "CC": "clang"
+    },
+    "extra_params": {
+      "ANDROID_MAJOR_VERSION": "r",
+      "KCFLAGS": "-w",
+      "CONFIG_SECTION_MISMATCH_WARN_ONLY": "y"
+    }
+  },
+  "features": {
+    "kernelsu": {
+      "enabled": true,
+      "ref": "v0.9.5",
+      "setup_url": "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh"
+    },
+    "mt7612u_backport": {
+      "enabled": true
+    },
+    "selinux": {
+      "enabled": true,
+      "mode": "forced-persistent-permissive"
+    }
+  },
+  "config": {
+    "fragment": "configs/a32x-nethunter-full.config",
+    "expected_assertions": 234,
+    "preserve_baseline": true
+  },
+  "boot_image": {
+    "packer": "android-v2",
+    "kernel_payload": "arch/{arch}/boot/Image.gz",
+    "output_name": "a32x-nethunter-full-mt7612u-kernelsu-permissive-boot.img"
+  },
+  "commands": {
+    "post_clone": [],
+    "pre_config": [],
+    "pre_build": [],
+    "post_build": []
+  }
+}
