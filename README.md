@@ -1,5 +1,8 @@
 # Android Kernel Build Harness
 
+[![Validate kernel harness](https://github.com/Dosa42/android-kernel-build-harness/actions/workflows/validate-harness.yml/badge.svg)](https://github.com/Dosa42/android-kernel-build-harness/actions/workflows/validate-harness.yml)
+[![Build kernel experiment](https://github.com/Dosa42/android-kernel-build-harness/actions/workflows/build-kernel.yml/badge.svg)](https://github.com/Dosa42/android-kernel-build-harness/actions/workflows/build-kernel.yml)
+
 A reusable, profile-driven Linux/Android kernel build system for GitHub Actions and local Linux. It keeps source selection, toolchains, kernel configuration, feature patches, verification, evidence, and boot-image packaging in one deterministic pipeline.
 
 The initial `a32x-full` profile is the exact continuation of the successful Samsung A32x work:
