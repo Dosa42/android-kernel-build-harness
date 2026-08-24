@@ -1,4 +1,4 @@
-use crate::{codex, logging, oauth, schema, storage};
+use crate::{codex, logging, oauth, scanner, schema, storage};
 use eframe::egui;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
@@ -15,13 +15,14 @@ pub struct SchemaEngineApp {
 enum AppEvent {
     Login(Result<oauth::OAuthSession, String>),
     Answer(Result<String, String>, oauth::OAuthSession),
+    Scan(Result<String, String>),
 }
 
 impl Default for SchemaEngineApp {
     fn default() -> Self {
         Self {
             input: String::new(),
-            result: "Enter one Codex configuration problem or question.".into(),
+            result: "Milestone 2 ready: run the mechanical system scan to discover Codex/schema files, or enter one Codex configuration question.".into(),
             status: format!("Embedded schema: {} lines · {} bytes", schema::line_count(), schema::byte_count()),
             session: storage::load_session(),
             busy: false,
@@ -67,6 +68,19 @@ impl SchemaEngineApp {
         });
     }
 
+    fn start_scan(&mut self) {
+        if self.busy { return; }
+        let (tx, rx) = mpsc::channel();
+        self.rx = Some(rx);
+        self.busy = true;
+        self.result = "Mechanical scan running. This may inspect a very large number of files; latency is intentionally not optimized away.".into();
+        self.status = "Milestone 2 mechanical system scan running…".into();
+        std::thread::spawn(move || {
+            let report = scanner::scan_system_json();
+            let _ = tx.send(AppEvent::Scan(report));
+        });
+    }
+
     fn poll(&mut self) {
         let Some(rx) = &self.rx else { return };
         match rx.try_recv() {
@@ -99,6 +113,20 @@ impl SchemaEngineApp {
                 self.session = Some(session);
                 self.result = format!("ENGINE_FAILED\n{e}");
                 self.status = "Engine request failed.".into();
+                self.busy = false;
+                self.rx = None;
+            }
+            Ok(AppEvent::Scan(Ok(report))) => {
+                logging::event("scanner", "mechanical_scan_completed");
+                self.result = report;
+                self.status = "Milestone 2 mechanical scan completed.".into();
+                self.busy = false;
+                self.rx = None;
+            }
+            Ok(AppEvent::Scan(Err(e))) => {
+                logging::event("scanner_error", &e);
+                self.result = format!("SCAN_FAILED\n{e}");
+                self.status = "Milestone 2 mechanical scan failed.".into();
                 self.busy = false;
                 self.rx = None;
             }
@@ -146,22 +174,26 @@ impl eframe::App for SchemaEngineApp {
                     ui.add(egui::Label::new(self.schema_job.clone()).selectable(true));
                 });
 
-                cols[1].heading("Result");
-                cols[1].label("One input → one schema-focused result. No tools, no RAG, no edit/write mode in Milestone 1.");
+                cols[1].heading("Milestone 2 — Mechanical discovery");
+                cols[1].label("Deterministic filesystem discovery only. No AI classification, no edit/write tools, no silent permission skipping.");
+                if cols[1].add_enabled(!self.busy, egui::Button::new("Scan system for Codex/schema files")).clicked() {
+                    self.start_scan();
+                }
                 cols[1].separator();
-                egui::ScrollArea::vertical().max_height(360.0).show(&mut cols[1], |ui| {
+                cols[1].heading("Result");
+                egui::ScrollArea::vertical().max_height(330.0).show(&mut cols[1], |ui| {
                     ui.add(egui::Label::new(egui::RichText::new(&self.result).monospace()).selectable(true));
                 });
                 cols[1].separator();
-                cols[1].label("Describe the Codex configuration problem or question in plain language:");
-                cols[1].add(egui::TextEdit::multiline(&mut self.input).desired_rows(6).hint_text("Example: My PreToolUse hook never runs. What in the schema could explain this?"));
+                cols[1].label("Optional M1 schema question:");
+                cols[1].add(egui::TextEdit::multiline(&mut self.input).desired_rows(5).hint_text("Example: My PreToolUse hook never runs. What in the schema could explain this?"));
                 if cols[1].add_enabled(!self.busy && self.session.is_some() && !self.input.trim().is_empty(), egui::Button::new("Run Schema Engine")).clicked() {
                     self.start_query();
                 }
                 cols[1].separator();
                 cols[1].monospace(format!("model: {}", codex::MODEL));
-                cols[1].monospace("instructions: FULL embedded config-schema.json");
-                cols[1].monospace("tools: none");
+                cols[1].monospace("M2 scanner: mechanical / deterministic");
+                cols[1].monospace("M2 scanner tools: read-only filesystem inspection");
                 cols[1].monospace("store: false");
             });
         });
