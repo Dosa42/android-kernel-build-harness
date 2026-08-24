@@ -1,0 +1,108 @@
+name: Build Codex Schema Engine M1
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "rust-projects/codex-schema-engine-m1/**"
+      - ".github/workflows/build-codex-schema-engine.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust-projects/codex-schema-engine-m1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxinerama-dev \
+            libxkbcommon-dev \
+            libgl1-mesa-dev
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-projects/codex-schema-engine-m1
+
+      - name: Materialize exact Codex schema asset
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          curl --fail --silent --show-error --location \
+            https://developers.openai.com/codex/config-schema.json \
+            --output assets/config-schema.json
+          echo "affe54cce9b9945ffd32d322415ff4cc844c62068c1190be6355580be4ca9350  assets/config-schema.json" | sha256sum --check --strict
+          test "$(wc -l < assets/config-schema.json)" -eq 6212
+          test "$(wc -c < assets/config-schema.json)" -eq 181805
+
+      - name: Generate lockfile
+        run: cargo generate-lockfile
+
+      - name: Compile tests
+        run: cargo test --locked --no-run
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Inspect release binary
+        run: |
+          set -euo pipefail
+          test -x target/release/codex-schema-engine
+          file target/release/codex-schema-engine
+          sha256sum target/release/codex-schema-engine
+          ls -lh target/release/codex-schema-engine
+
+      - name: Create build report
+        if: always()
+        run: |
+          set +e
+          mkdir -p artifact
+          cp target/release/codex-schema-engine artifact/ 2>/dev/null || true
+          cp Cargo.lock artifact/ 2>/dev/null || true
+          {
+            echo "Codex Schema Engine M1"
+            echo "commit=${GITHUB_SHA}"
+            echo "runner=${RUNNER_OS}/${RUNNER_ARCH}"
+            rustc --version
+            cargo --version
+            echo "schema_sha256=affe54cce9b9945ffd32d322415ff4cc844c62068c1190be6355580be4ca9350"
+            if test -f target/release/codex-schema-engine; then
+              file target/release/codex-schema-engine
+              sha256sum target/release/codex-schema-engine
+              stat -c 'size_bytes=%s' target/release/codex-schema-engine
+            else
+              echo "release_binary=missing"
+            fi
+          } > artifact/build-report.txt
+
+      - name: Upload build artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-schema-engine-m1-linux-x86_64-${{ github.run_number }}
+          path: rust-projects/codex-schema-engine-m1/artifact/
+          if-no-files-found: error
+          retention-days: 30
