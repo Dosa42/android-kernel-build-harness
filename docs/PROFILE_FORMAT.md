@@ -20,7 +20,9 @@ Every build is a JSON document in `profiles/`. A profile is versioned with the h
 
 ### `toolchains`
 
-Each toolchain has a unique `name`, `repository`, `ref`, and optional `recursive` and `depth`. All discovered `bin` directories are added to `PATH`.
+Each toolchain has a unique `name`, `repository`, `ref`, and optional `recursive`, `depth`, and `path_prepend_globs`. All discovered `bin` directories are added to `PATH`; explicit glob matches are placed first and must match at least one directory.
+
+The A32x reference profile uses `clang-r383902*/bin`, matching the exact compiler selection from the successful source workflow instead of accepting another clang directory that happens to exist in the same prebuilt-toolchain branch.
 
 Make values can reference an absolute checkout path with `{toolchain:name}`. Example:
 
