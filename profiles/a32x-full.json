@@ -20,10 +20,7 @@
       "repository": "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86",
       "ref": "android-r-beta-2",
       "recursive": true,
-      "depth": 1,
-      "path_prepend_globs": [
-        "clang-r383902*/bin"
-      ]
+      "depth": 1
     },
     {
       "name": "gcc64",
@@ -38,7 +35,7 @@
       "ARCH": "arm64",
       "CROSS_COMPILE": "{toolchain:gcc64}/bin/aarch64-linux-android-",
       "CLANG_TRIPLE": "aarch64-linux-gnu-",
-      "CC": "clang"
+      "CC": "{toolchain:clang}/clang-r383902/bin/clang"
     },
     "extra_params": {
       "ANDROID_MAJOR_VERSION": "r",
