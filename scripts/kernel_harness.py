@@ -105,6 +105,13 @@ def validate_profile(profile_path: Path, profile: dict[str, Any]) -> dict[str, A
                 errors.append(f"toolchains[{index}].{key} must be a non-empty string")
         if isinstance(toolchain.get("name"), str):
             names.append(toolchain["name"])
+        path_globs = toolchain.get("path_prepend_globs", [])
+        if not isinstance(path_globs, list) or not all(
+            isinstance(value, str) and value for value in path_globs
+        ):
+            errors.append(
+                f"toolchains[{index}].path_prepend_globs must be a list of non-empty strings"
+            )
     if len(names) != len(set(names)):
         errors.append("toolchain names must be unique")
 
@@ -302,10 +309,22 @@ def resolve_placeholders(value: str, toolchains: dict[str, Path]) -> str:
     return resolved
 
 
-def build_environment(toolchains: dict[str, Path]) -> dict[str, str]:
+def build_environment(
+    toolchains: dict[str, Path], definitions: list[dict[str, Any]]
+) -> tuple[dict[str, str], list[str]]:
     env = os.environ.copy()
+    preferred: list[Path] = []
     bin_dirs: list[Path] = []
-    for root in toolchains.values():
+    definition_by_name = {item["name"]: item for item in definitions}
+    for name, root in toolchains.items():
+        definition = definition_by_name[name]
+        for pattern in definition.get("path_prepend_globs", []):
+            matches = sorted(path for path in root.glob(pattern) if path.is_dir())
+            if not matches:
+                raise RuntimeError(
+                    f"toolchain {name!r} path_prepend_glob matched nothing: {pattern}"
+                )
+            preferred.extend(matches)
         bin_dirs.extend(path for path in root.rglob("bin") if path.is_dir())
     clang_bins = sorted(
         path.parent
@@ -313,13 +332,13 @@ def build_environment(toolchains: dict[str, Path]) -> dict[str, str]:
         for path in root.rglob("bin/clang")
         if path.is_file()
     )
-    ordered: list[Path] = []
-    if clang_bins:
+    ordered: list[Path] = list(preferred)
+    if clang_bins and not preferred:
         ordered.append(clang_bins[-1])
     ordered.extend(sorted(set(bin_dirs)))
     unique = list(dict.fromkeys(str(path) for path in ordered))
     env["PATH"] = os.pathsep.join(unique + [env.get("PATH", "")])
-    return env
+    return env, unique
 
 
 def run_hooks(
@@ -552,8 +571,16 @@ def execute_build(args: argparse.Namespace) -> int:
             )
         state["toolchain_commits"] = commits
 
-        env = build_environment(toolchains)
+        env, path_prefixes = build_environment(toolchains, profile["toolchains"])
         env.update(base_env)
+        state["toolchain_path_prefixes"] = path_prefixes
+        if profile["make"].get("params", {}).get("CC") == "clang":
+            runner.run(
+                ["clang", "--version"],
+                cwd=source,
+                env=env,
+                label="toolchain:clang-version",
+            )
         make_values: dict[str, str] = {"ARCH": profile["kernel"]["arch"]}
         for section in ("params", "extra_params"):
             for key, value in profile["make"].get(section, {}).items():
