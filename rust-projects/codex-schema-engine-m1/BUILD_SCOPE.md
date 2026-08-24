@@ -1,0 +1,1 @@
+Milestone 1 only: native Rust UI, embedded Codex schema, ChatGPT OAuth/PKCE, direct Codex Responses request, explicit failure handling. No edit mode, tools, RAG, retrieval/index, API-key fallback, or alternate provider.
