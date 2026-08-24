@@ -341,6 +341,21 @@ def build_environment(
     return env, unique
 
 
+def add_harness_variables(
+    env: dict[str, str], *, source: Path, out_dir: Path, profile_id: str
+) -> dict[str, str]:
+    result = env.copy()
+    result.update(
+        {
+            "HARNESS_ROOT": str(HARNESS_ROOT),
+            "KERNEL_SOURCE": str(source),
+            "OUT_DIR": str(out_dir),
+            "PROFILE_ID": profile_id,
+        }
+    )
+    return result
+
+
 def run_hooks(
     runner: CommandRunner,
     commands: dict[str, list[str]],
@@ -495,14 +510,11 @@ def execute_build(args: argparse.Namespace) -> int:
         git_clone(runner, profile["source"], source, work_dir, "clone:kernel")
         state["source_commit"] = git_commit(runner, source, "source-commit")
 
-        base_env = os.environ.copy()
-        base_env.update(
-            {
-                "HARNESS_ROOT": str(HARNESS_ROOT),
-                "KERNEL_SOURCE": str(source),
-                "OUT_DIR": str(out_dir),
-                "PROFILE_ID": profile["id"],
-            }
+        base_env = add_harness_variables(
+            os.environ.copy(),
+            source=source,
+            out_dir=out_dir,
+            profile_id=profile["id"],
         )
         run_hooks(runner, profile["commands"], "post_clone", source, base_env)
 
@@ -572,7 +584,12 @@ def execute_build(args: argparse.Namespace) -> int:
         state["toolchain_commits"] = commits
 
         env, path_prefixes = build_environment(toolchains, profile["toolchains"])
-        env.update(base_env)
+        env = add_harness_variables(
+            env,
+            source=source,
+            out_dir=out_dir,
+            profile_id=profile["id"],
+        )
         state["toolchain_path_prefixes"] = path_prefixes
         if profile["make"].get("params", {}).get("CC") == "clang":
             runner.run(
