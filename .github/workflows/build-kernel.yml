@@ -1,0 +1,158 @@
+name: Build kernel experiment
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Profile name from profiles/ without .json
+        required: true
+        default: a32x-full
+        type: string
+      source_repository:
+        description: Optional kernel repository override
+        required: false
+        type: string
+      source_ref:
+        description: Optional kernel branch/tag override
+        required: false
+        type: string
+      defconfig:
+        description: Optional defconfig override
+        required: false
+        type: string
+      config_fragment:
+        description: Optional repository-relative config fragment override
+        required: false
+        type: string
+      kernelsu:
+        description: KernelSU feature state
+        required: true
+        default: inherit
+        type: choice
+        options: [inherit, "true", "false"]
+      kernelsu_ref:
+        description: Optional KernelSU tag/ref override
+        required: false
+        type: string
+      mt7612u:
+        description: MT7612U backport feature state
+        required: true
+        default: inherit
+        type: choice
+        options: [inherit, "true", "false"]
+      forced_permissive:
+        description: Permanently forced SELinux permissive feature state
+        required: true
+        default: inherit
+        type: choice
+        options: [inherit, "true", "false"]
+      base_boot_url:
+        description: Optional URL for the exact device boot image to repack
+        required: false
+        type: string
+      base_boot_sha256:
+        description: Optional required SHA-256 for the downloaded base boot image
+        required: false
+        type: string
+      artifact_retention_days:
+        description: Artifact retention in days
+        required: true
+        default: "14"
+        type: string
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-${{ github.ref }}-${{ inputs.profile || 'a32x-full' }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[kernel-build]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      PROFILE: ${{ inputs.profile || 'a32x-full' }}
+      SOURCE_REPOSITORY: ${{ inputs.source_repository || '' }}
+      SOURCE_REF: ${{ inputs.source_ref || '' }}
+      DEFCONFIG: ${{ inputs.defconfig || '' }}
+      CONFIG_FRAGMENT: ${{ inputs.config_fragment || '' }}
+      KERNELSU: ${{ inputs.kernelsu || 'inherit' }}
+      KERNELSU_REF: ${{ inputs.kernelsu_ref || '' }}
+      MT7612U: ${{ inputs.mt7612u || 'inherit' }}
+      FORCED_PERMISSIVE: ${{ inputs.forced_permissive || 'inherit' }}
+      BASE_BOOT_URL: ${{ inputs.base_boot_url || secrets.BASE_BOOT_URL }}
+      BASE_BOOT_SHA256: ${{ inputs.base_boot_sha256 || secrets.BASE_BOOT_SHA256 }}
+
+    steps:
+      - name: Check out harness
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc build-essential curl file flex gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi git jq libarchive-tools libelf-dev \
+            libfl-dev libssl-dev lftp python3 wget zip zstd
+
+      - name: Validate selected profile
+        run: python3 scripts/kernel_harness.py validate-profile --profile "profiles/${PROFILE}.json"
+
+      - name: Resolve optional base boot image
+        run: |
+          set -euo pipefail
+          if [[ -z "${BASE_BOOT_URL}" ]]; then
+            echo "BASE_BOOT=" >> "$GITHUB_ENV"
+            echo "No base boot image supplied; raw kernel artifacts will be built." 
+            exit 0
+          fi
+
+          mkdir -p "$RUNNER_TEMP/kernel-input"
+          target="$RUNNER_TEMP/kernel-input/base-boot.img"
+          curl -fL --retry 3 --retry-all-errors "$BASE_BOOT_URL" -o "$target"
+          if [[ -n "${BASE_BOOT_SHA256}" ]]; then
+            echo "${BASE_BOOT_SHA256}  ${target}" | sha256sum --check --strict
+          fi
+          echo "BASE_BOOT=${target}" >> "$GITHUB_ENV"
+
+      - name: Build and verify kernel
+        run: |
+          set -euo pipefail
+          args=(
+            build
+            --profile "profiles/${PROFILE}.json"
+            --work-dir "$RUNNER_TEMP/kernel-harness"
+            --artifacts-dir "$GITHUB_WORKSPACE/artifacts"
+            --clean
+            --kernelsu "$KERNELSU"
+            --mt7612u "$MT7612U"
+            --forced-permissive "$FORCED_PERMISSIVE"
+          )
+          [[ -n "$SOURCE_REPOSITORY" ]] && args+=(--source-repository "$SOURCE_REPOSITORY")
+          [[ -n "$SOURCE_REF" ]] && args+=(--source-ref "$SOURCE_REF")
+          [[ -n "$DEFCONFIG" ]] && args+=(--defconfig "$DEFCONFIG")
+          [[ -n "$CONFIG_FRAGMENT" ]] && args+=(--config-fragment "$CONFIG_FRAGMENT")
+          [[ -n "$KERNELSU_REF" ]] && args+=(--kernelsu-ref "$KERNELSU_REF")
+          [[ -n "${BASE_BOOT:-}" ]] && args+=(--base-boot "$BASE_BOOT")
+          python3 scripts/kernel_harness.py "${args[@]}"
+
+      - name: Publish run summary
+        if: always()
+        run: |
+          if [[ -f artifacts/SUMMARY.md ]]; then
+            cat artifacts/SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload complete build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ env.PROFILE }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: ${{ inputs.artifact_retention_days || 14 }}
