@@ -57,7 +57,7 @@ jobs:
             https://developers.openai.com/codex/config-schema.json \
             --output assets/config-schema.json
           echo "affe54cce9b9945ffd32d322415ff4cc844c62068c1190be6355580be4ca9350  assets/config-schema.json" | sha256sum --check --strict
-          test "$(wc -l < assets/config-schema.json)" -eq 6212
+          test "$(wc -l < assets/config-schema.json)" -eq 6211
           test "$(wc -c < assets/config-schema.json)" -eq 181805
 
       - name: Generate lockfile
