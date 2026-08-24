@@ -45,6 +45,13 @@ class ProfileTests(unittest.TestCase):
             )
             self.assertEqual(Path(prefixes[0]), selected)
             self.assertEqual(Path(env["PATH"].split(os.pathsep)[0]), selected)
+            composed = kernel_harness.add_harness_variables(
+                env,
+                source=Path("/tmp/source"),
+                out_dir=Path("/tmp/out"),
+                profile_id="test",
+            )
+            self.assertEqual(composed["PATH"], env["PATH"])
 
 
 if __name__ == "__main__":
