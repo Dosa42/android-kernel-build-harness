@@ -313,7 +313,6 @@ def build_environment(
     toolchains: dict[str, Path], definitions: list[dict[str, Any]]
 ) -> tuple[dict[str, str], list[str]]:
     env = os.environ.copy()
-    preferred: list[Path] = []
     bin_dirs: list[Path] = []
     definition_by_name = {item["name"]: item for item in definitions}
     for name, root in toolchains.items():
@@ -324,20 +323,15 @@ def build_environment(
                 raise RuntimeError(
                     f"toolchain {name!r} path_prepend_glob matched nothing: {pattern}"
                 )
-            preferred.extend(matches)
+            bin_dirs.extend(matches)
         bin_dirs.extend(path for path in root.rglob("bin") if path.is_dir())
-    clang_bins = sorted(
-        path.parent
-        for root in toolchains.values()
-        for path in root.rglob("bin/clang")
-        if path.is_file()
-    )
-    ordered: list[Path] = list(preferred)
-    if clang_bins and not preferred:
-        ordered.append(clang_bins[-1])
-    ordered.extend(sorted(set(bin_dirs)))
+    ordered = sorted(set(bin_dirs))
     unique = list(dict.fromkeys(str(path) for path in ordered))
-    env["PATH"] = os.pathsep.join(unique + [env.get("PATH", "")])
+    # Keep the runner's native tools first. Android prebuilt directories can
+    # contain target-only programs named like host tools (notably `as`), so a
+    # toolchain-wide PATH prefix can break Kbuild's host utilities. Profiles
+    # select build compilers explicitly with {toolchain:name} paths instead.
+    env["PATH"] = os.pathsep.join([env.get("PATH", "")] + unique)
     return env, unique
 
 
@@ -590,19 +584,19 @@ def execute_build(args: argparse.Namespace) -> int:
             out_dir=out_dir,
             profile_id=profile["id"],
         )
-        state["toolchain_path_prefixes"] = path_prefixes
-        if profile["make"].get("params", {}).get("CC") == "clang":
-            runner.run(
-                ["clang", "--version"],
-                cwd=source,
-                env=env,
-                label="toolchain:clang-version",
-            )
+        state["toolchain_path_entries"] = path_prefixes
         make_values: dict[str, str] = {"ARCH": profile["kernel"]["arch"]}
         for section in ("params", "extra_params"):
             for key, value in profile["make"].get(section, {}).items():
                 if value != "":
                     make_values[key] = resolve_placeholders(str(value), toolchains)
+        if make_values.get("CC"):
+            runner.run(
+                [make_values["CC"], "--version"],
+                cwd=source,
+                env=env,
+                label="toolchain:compiler-version",
+            )
         jobs = args.jobs or (os.cpu_count() or 2)
         make_args = [
             "make",
