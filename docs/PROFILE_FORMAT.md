@@ -20,15 +20,17 @@ Every build is a JSON document in `profiles/`. A profile is versioned with the h
 
 ### `toolchains`
 
-Each toolchain has a unique `name`, `repository`, `ref`, and optional `recursive`, `depth`, and `path_prepend_globs`. All discovered `bin` directories are added to `PATH`; explicit glob matches are placed first and must match at least one directory.
+Each toolchain has a unique `name`, `repository`, `ref`, and optional `recursive`, `depth`, and `path_prepend_globs`. All discovered `bin` directories are appended to `PATH` after the runner's native tools. This prevents target programs such as an Android ARM assembler named `as` from shadowing the host assembler used to build Kbuild utilities. Optional glob entries must match at least one directory and add matching directories to the same toolchain PATH set.
 
-The A32x reference profile uses `clang-r383902*/bin`, matching the exact compiler selection from the successful source workflow instead of accepting another clang directory that happens to exist in the same prebuilt-toolchain branch.
+The A32x reference profile selects `clang-r383902/bin/clang` by absolute placeholder path, matching the exact compiler from the successful source workflow without replacing host utilities or accepting another clang in the same prebuilt-toolchain branch.
 
 Make values can reference an absolute checkout path with `{toolchain:name}`. Example:
 
 ```json
 "CROSS_COMPILE": "{toolchain:gcc64}/bin/aarch64-linux-android-"
 ```
+
+Use the same form for an exact compiler, for example `"CC": "{toolchain:clang}/clang-r383902/bin/clang"`. A bare command such as `"CC": "clang"` intentionally follows the runner's existing `PATH`.
 
 ### `make`
 
