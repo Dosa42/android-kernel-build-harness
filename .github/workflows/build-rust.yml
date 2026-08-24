@@ -1,0 +1,96 @@
+name: Build Rust Project
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_path:
+        description: "Path to the Rust project (directory containing Cargo.toml)"
+        required: true
+        default: "."
+      run_tests:
+        description: "Run cargo test before release build"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Rust release build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.project_path }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.project_path }}
+
+      - name: Show toolchain
+        run: |
+          rustc --version --verbose
+          cargo --version --verbose
+
+      - name: Verify Cargo project
+        run: |
+          test -f Cargo.toml || { echo "Cargo.toml not found in $PWD"; exit 1; }
+          cargo metadata --no-deps --format-version 1 > /tmp/cargo-metadata.json
+
+      - name: Run tests
+        if: ${{ inputs.run_tests }}
+        run: cargo test --locked --all-targets
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Collect release artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$GITHUB_WORKSPACE/rust-artifacts"
+          mkdir -p "$OUT"
+
+          if [ -d target/release ]; then
+            find target/release -maxdepth 1 -type f \
+              ! -name '*.d' \
+              ! -name '.cargo-lock' \
+              -exec cp -v {} "$OUT/" \;
+          fi
+
+          {
+            echo "project_path=${{ inputs.project_path }}"
+            echo "commit=${GITHUB_SHA}"
+            echo "runner=${RUNNER_OS}/${RUNNER_ARCH}"
+            rustc --version || true
+            cargo --version || true
+            echo
+            echo "Artifacts:"
+            if compgen -G "$OUT/*" > /dev/null; then
+              for f in "$OUT"/*; do
+                file "$f" || true
+                sha256sum "$f" || true
+              done
+            else
+              echo "No release artifacts collected."
+            fi
+          } > "$OUT/build-report.txt"
+
+      - name: Upload Rust artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-release-${{ github.run_number }}
+          path: rust-artifacts/
+          if-no-files-found: error
+          retention-days: 30
