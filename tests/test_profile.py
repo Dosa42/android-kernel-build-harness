@@ -25,7 +25,7 @@ class ProfileTests(unittest.TestCase):
         self.assertTrue(profile["features"]["mt7612u_backport"]["enabled"])
         self.assertTrue(profile["features"]["kernelsu"]["enabled"])
 
-    def test_explicit_toolchain_path_precedes_other_clang_versions(self) -> None:
+    def test_toolchain_bins_do_not_shadow_host_tools(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "clang"
             selected = root / "clang-r383902b/bin"
@@ -36,15 +36,12 @@ class ProfileTests(unittest.TestCase):
             (newer / "clang").write_text("", encoding="utf-8")
             env, prefixes = kernel_harness.build_environment(
                 {"clang": root},
-                [
-                    {
-                        "name": "clang",
-                        "path_prepend_globs": ["clang-r383902*/bin"],
-                    }
-                ],
+                [{"name": "clang"}],
             )
-            self.assertEqual(Path(prefixes[0]), selected)
-            self.assertEqual(Path(env["PATH"].split(os.pathsep)[0]), selected)
+            original_path = os.environ.get("PATH", "")
+            self.assertTrue(env["PATH"].startswith(original_path + os.pathsep))
+            self.assertIn(str(selected), prefixes)
+            self.assertIn(str(newer), prefixes)
             composed = kernel_harness.add_harness_variables(
                 env,
                 source=Path("/tmp/source"),
@@ -52,6 +49,17 @@ class ProfileTests(unittest.TestCase):
                 profile_id="test",
             )
             self.assertEqual(composed["PATH"], env["PATH"])
+
+    def test_make_compiler_can_select_an_exact_toolchain_path(self) -> None:
+        toolchain = Path("/tmp/toolchains/clang")
+        value = kernel_harness.resolve_placeholders(
+            "{toolchain:clang}/clang-r383902/bin/clang",
+            {"clang": toolchain},
+        )
+        self.assertEqual(
+            value,
+            "/tmp/toolchains/clang/clang-r383902/bin/clang",
+        )
 
 
 if __name__ == "__main__":
