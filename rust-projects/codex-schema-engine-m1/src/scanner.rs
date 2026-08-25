@@ -14,10 +14,6 @@ const FULL_PASSES: usize = 3;
 const IO_ATTEMPTS: usize = 5;
 const RETRY_DELAY_MS: u64 = 12;
 
-// Concrete filenames only. These are the well-known names discussed for the
-// Codex/config surface. Config keys such as developer_instructions,
-// model_instructions_file, config_file, permissions and path are deliberately
-// not treated as filenames.
 const IMPORTANT_FILE_NAMES: &[&[u8]] = &[
     b"config.toml",
     b"AGENTS.md",
@@ -113,6 +109,13 @@ where
     progress("Pre-flight 1/2 — scanning entire Linux filesystem for Codex directories…".into());
     let (codex_directories, directory_stats) = discover_codex_directories()?;
 
+    if codex_directories.is_empty() {
+        return Err(
+            "PREFLIGHT_FAILED: Phase 1 completed but found no codex/.codex directories; Phase 2 was not started."
+                .into(),
+        );
+    }
+
     progress(format!(
         "Pre-flight 1/2 complete — {} Codex director{} found. Verifying hand-off to file discovery…",
         codex_directories.len(),
@@ -144,20 +147,12 @@ where
     ))
 }
 
-pub fn scan_codex_directories() -> Result<String, String> {
-    let (found, stats) = discover_codex_directories()?;
-    Ok(render_directory_only_report(&found, &stats))
-}
-
 fn discover_codex_directories() -> Result<(BTreeSet<PathBuf>, DirectoryScanStats), String> {
     preflight_root()?;
 
     let mut found = BTreeSet::<PathBuf>::new();
     let mut totals = DirectoryScanStats::default();
 
-    // Multiple complete passes are intentional. Linux directory trees can change
-    // while a scan is running; repeating the whole traversal reduces the chance
-    // that a short-lived rename/mount transition hides a persistent Codex folder.
     for _ in 0..FULL_PASSES {
         let pass = scan_one_full_directory_pass(&mut found)?;
         totals.absorb(&pass);
@@ -291,8 +286,6 @@ fn snapshot_directory_phase_one_once(
     let entries = fs::read_dir(directory)?;
     let mut children = Vec::<PathBuf>::new();
 
-    // Phase 1 sees directory entries but queues only directories and symlinks.
-    // It never opens a regular file.
     for entry_result in entries {
         let entry = entry_result?;
         stats.directory_entries_seen += 1;
@@ -433,17 +426,10 @@ fn scan_one_codex_tree_for_files(
 
         for entry in entries {
             match entry.kind {
-                EntryKind::Directory => queue.push_back(WorkItem {
+                EntryKind::Directory | EntryKind::DirectorySymlink => queue.push_back(WorkItem {
                     path: entry.path,
                     ancestors: Arc::clone(&lineage),
                 }),
-                EntryKind::DirectorySymlink => {
-                    stats.directory_symlinks_followed += 0;
-                    queue.push_back(WorkItem {
-                        path: entry.path,
-                        ancestors: Arc::clone(&lineage),
-                    });
-                }
                 EntryKind::RegularFile => {
                     stats.regular_files_seen += 1;
                     record_if_important(&entry.path, codex_root, hits);
@@ -641,7 +627,10 @@ fn canonical_important_name(name: &OsStr) -> Option<String> {
         .map(|candidate| String::from_utf8_lossy(candidate).into_owned())
 }
 
-fn extend_lineage(ancestors: &Arc<Vec<DirectoryId>>, identity: DirectoryId) -> Arc<Vec<DirectoryId>> {
+fn extend_lineage(
+    ancestors: &Arc<Vec<DirectoryId>>,
+    identity: DirectoryId,
+) -> Arc<Vec<DirectoryId>> {
     let mut lineage = Vec::with_capacity(ancestors.len() + 1);
     lineage.extend_from_slice(ancestors.as_slice());
     lineage.push(identity);
@@ -715,21 +704,43 @@ fn render_wizard_report(
         directory_stats.directory_entries_seen
     ));
     output.push_str(&format!(
+        "directory_candidates_seen={}\n",
+        directory_stats.directory_candidates_seen
+    ));
+    output.push_str(&format!(
+        "symlink_candidates_seen={}\n",
+        directory_stats.symlink_candidates_seen
+    ));
+    output.push_str(&format!(
+        "directory_symlinks_followed={}\n",
+        directory_stats.symlink_directories_followed
+    ));
+    output.push_str(&format!(
+        "cycle_edges_stopped={}\n",
+        directory_stats.cycle_edges_stopped
+    ));
+    output.push_str(&format!(
+        "duplicate_paths_stopped={}\n",
+        directory_stats.duplicate_paths_stopped
+    ));
+    output.push_str(&format!(
+        "transient_disappearances={}\n",
+        directory_stats.transient_disappearances
+    ));
+    output.push_str(&format!("io_retries={}\n", directory_stats.io_retries));
+    output.push_str(&format!(
         "codex_directories_found={}\n\n",
         codex_directories.len()
     ));
 
     output.push_str("FOUND CODEX DIRECTORIES\n");
-    if codex_directories.is_empty() {
-        output.push_str("none\n");
-    } else {
-        for directory in codex_directories {
-            output.push_str(&directory.to_string_lossy());
-            output.push('\n');
-        }
+    for directory in codex_directories {
+        output.push_str(&directory.to_string_lossy());
+        output.push('\n');
     }
 
     output.push_str("\nPHASE 2 — IMPORTANT FILE DISCOVERY: OK\n");
+    output.push_str("file_contents_read=0\n");
     output.push_str("filename_targets=\n");
     for name in IMPORTANT_FILE_NAMES {
         output.push_str("  - ");
@@ -739,11 +750,36 @@ fn render_wizard_report(
     output.push_str(&format!("codex_roots_received={}\n", file_stats.codex_roots_received));
     output.push_str(&format!("codex_roots_scanned={}\n", file_stats.codex_roots_scanned));
     output.push_str(&format!(
+        "directory_paths_examined={}\n",
+        file_stats.directory_paths_examined
+    ));
+    output.push_str(&format!(
         "directories_enumerated={}\n",
         file_stats.directories_enumerated
     ));
+    output.push_str(&format!(
+        "directory_entries_seen={}\n",
+        file_stats.directory_entries_seen
+    ));
     output.push_str(&format!("regular_files_seen={}\n", file_stats.regular_files_seen));
     output.push_str(&format!("file_symlinks_seen={}\n", file_stats.file_symlinks_seen));
+    output.push_str(&format!(
+        "directory_symlinks_followed={}\n",
+        file_stats.directory_symlinks_followed
+    ));
+    output.push_str(&format!(
+        "cycle_edges_stopped={}\n",
+        file_stats.cycle_edges_stopped
+    ));
+    output.push_str(&format!(
+        "duplicate_paths_stopped={}\n",
+        file_stats.duplicate_paths_stopped
+    ));
+    output.push_str(&format!(
+        "transient_disappearances={}\n",
+        file_stats.transient_disappearances
+    ));
+    output.push_str(&format!("io_retries={}\n", file_stats.io_retries));
     output.push_str(&format!("matching_files_found={}\n\n", file_hits.len()));
 
     output.push_str("FOUND IMPORTANT FILES\n");
@@ -759,35 +795,6 @@ fn render_wizard_report(
                 output.push_str(&root.to_string_lossy());
                 output.push('\n');
             }
-        }
-    }
-
-    output
-}
-
-fn render_directory_only_report(found: &BTreeSet<PathBuf>, stats: &DirectoryScanStats) -> String {
-    let mut output = String::new();
-    output.push_str("scan_scope=entire_linux_tree_from_/\n");
-    output.push_str("regular_file_contents_read=0\n");
-    output.push_str("directory_name_filter=.codex_or_codex_case_insensitive\n");
-    output.push_str(&format!("full_passes={}\n", stats.passes_completed));
-    output.push_str(&format!(
-        "directory_paths_examined={}\n",
-        stats.directory_paths_examined
-    ));
-    output.push_str(&format!(
-        "directories_enumerated={}\n",
-        stats.directories_enumerated
-    ));
-    output.push_str(&format!("codex_directories_found={}\n", found.len()));
-    output.push_str("\nFOUND CODEX DIRECTORIES\n");
-
-    if found.is_empty() {
-        output.push_str("none\n");
-    } else {
-        for path in found {
-            output.push_str(&path.to_string_lossy());
-            output.push('\n');
         }
     }
 
