@@ -1,21 +1,26 @@
 use serde::Serialize;
 use serde_json::{json, Value as JsonValue};
-use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
 
-const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_STDERR_BYTES: usize = 128 * 1024;
 
+/// Read-only runtime snapshot obtained from the locally installed Codex App Server.
+/// No write RPCs are sent by this client.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct AppServerSnapshot {
     pub available: bool,
     pub initialize: Option<JsonValue>,
     pub config_read: Option<JsonValue>,
     pub config_requirements_read: Option<JsonValue>,
+    pub skills_list: Option<JsonValue>,
+    pub hooks_list: Option<JsonValue>,
+    pub plugin_installed: Option<JsonValue>,
     pub errors: Vec<String>,
     pub stderr: String,
 }
@@ -27,6 +32,9 @@ impl AppServerSnapshot {
             initialize: None,
             config_read: None,
             config_requirements_read: None,
+            skills_list: None,
+            hooks_list: None,
+            plugin_installed: None,
             errors: vec![reason.into()],
             stderr: String::new(),
         }
@@ -53,12 +61,29 @@ impl AppServerSnapshot {
             .as_ref()?
             .get("requirements")
     }
+
+    pub(crate) fn codex_home(&self) -> Option<&str> {
+        self.initialize.as_ref()?.get("codexHome")?.as_str()
+    }
+
+    pub(crate) fn skills_entries(&self) -> Option<&[JsonValue]> {
+        self.skills_list.as_ref()?.get("data")?.as_array().map(Vec::as_slice)
+    }
+
+    pub(crate) fn hooks_entries(&self) -> Option<&[JsonValue]> {
+        self.hooks_list.as_ref()?.get("data")?.as_array().map(Vec::as_slice)
+    }
+
+    pub(crate) fn installed_plugin_marketplaces(&self) -> Option<&[JsonValue]> {
+        self.plugin_installed
+            .as_ref()?
+            .get("marketplaces")?
+            .as_array()
+            .map(Vec::as_slice)
+    }
 }
 
-pub(crate) fn probe(
-    codex_binary: Option<&Path>,
-    cwd: &Path,
-) -> AppServerSnapshot {
+pub(crate) fn probe(codex_binary: Option<&Path>, cwd: &Path) -> AppServerSnapshot {
     let Some(codex_binary) = codex_binary else {
         return AppServerSnapshot::unavailable("Codex executable was not found on PATH.");
     };
@@ -90,6 +115,9 @@ pub(crate) fn probe(
                         initialize: None,
                         config_read: None,
                         config_requirements_read: None,
+                        skills_list: None,
+                        hooks_list: None,
+                        plugin_installed: None,
                         errors,
                         stderr,
                     };
@@ -100,32 +128,55 @@ pub(crate) fn probe(
                 errors.push(format!("initialized notification failed: {error}"));
             }
 
-            let config_read = match client.request(
+            let config_read = read_optional(
+                &mut client,
+                &mut errors,
                 2,
                 "config/read",
                 Some(json!({
                     "includeLayers": true,
                     "cwd": cwd.to_string_lossy()
                 })),
-            ) {
-                Ok(value) => Some(value),
-                Err(error) => {
-                    errors.push(format!("config/read failed: {error}"));
-                    None
-                }
-            };
+            );
 
-            let config_requirements_read = match client.request(
+            let config_requirements_read = read_optional(
+                &mut client,
+                &mut errors,
                 3,
                 "configRequirements/read",
                 None,
-            ) {
-                Ok(value) => Some(value),
-                Err(error) => {
-                    errors.push(format!("configRequirements/read failed: {error}"));
-                    None
-                }
-            };
+            );
+
+            let skills_list = read_optional(
+                &mut client,
+                &mut errors,
+                4,
+                "skills/list",
+                Some(json!({
+                    "cwds": [cwd.to_string_lossy()],
+                    "forceReload": true
+                })),
+            );
+
+            let hooks_list = read_optional(
+                &mut client,
+                &mut errors,
+                5,
+                "hooks/list",
+                Some(json!({
+                    "cwds": [cwd.to_string_lossy()]
+                })),
+            );
+
+            let plugin_installed = read_optional(
+                &mut client,
+                &mut errors,
+                6,
+                "plugin/installed",
+                Some(json!({
+                    "cwds": [cwd.to_string_lossy()]
+                })),
+            );
 
             let stderr = client.finish();
             let available = initialize.is_some() && config_read.is_some();
@@ -134,11 +185,30 @@ pub(crate) fn probe(
                 initialize,
                 config_read,
                 config_requirements_read,
+                skills_list,
+                hooks_list,
+                plugin_installed,
                 errors,
                 stderr,
             }
         }
         Err(error) => AppServerSnapshot::unavailable(error),
+    }
+}
+
+fn read_optional(
+    client: &mut ProtocolClient,
+    errors: &mut Vec<String>,
+    id: i64,
+    method: &str,
+    params: Option<JsonValue>,
+) -> Option<JsonValue> {
+    match client.request(id, method, params) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            errors.push(format!("{method} failed: {error}"));
+            None
+        }
     }
 }
 
@@ -192,9 +262,8 @@ impl ProtocolClient {
         let (stderr_tx, stderr_rx) = mpsc::channel();
         thread::spawn(move || {
             let mut data = Vec::new();
-            let mut reader = BufReader::new(stderr);
-            let _ = std::io::Read::take(&mut reader, MAX_STDERR_BYTES as u64)
-                .read_to_end(&mut data);
+            let mut reader = BufReader::new(stderr).take(MAX_STDERR_BYTES as u64);
+            let _ = reader.read_to_end(&mut data);
             let _ = stderr_tx.send(data);
         });
 
@@ -227,8 +296,9 @@ impl ProtocolClient {
                 .map_err(|error| format!("timeout/disconnect waiting for {method} response: {error}"))??;
 
             if message.get("id").and_then(JsonValue::as_i64) != Some(id) {
-                // Notifications and unrelated server messages are valid while a
-                // request is pending; this verifier does not need to consume them.
+                // Notifications and server requests can legally arrive while a read
+                // request is pending. This probe only issues read RPCs, so unrelated
+                // messages are ignored rather than interpreted as verifier evidence.
                 continue;
             }
             if let Some(error) = message.get("error") {
@@ -290,16 +360,6 @@ impl Drop for ProtocolClient {
     }
 }
 
-trait ReadToEndExt {
-    fn read_to_end(&mut self, buffer: &mut Vec<u8>) -> std::io::Result<usize>;
-}
-
-impl<R: std::io::Read> ReadToEndExt for std::io::Take<R> {
-    fn read_to_end(&mut self, buffer: &mut Vec<u8>) -> std::io::Result<usize> {
-        std::io::Read::read_to_end(self, buffer)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -314,11 +374,24 @@ mod tests {
                     "name": "codex_schema_engine_verifier",
                     "title": "Codex Schema Engine Verifier",
                     "version": "0.1.0"
-                }
+                },
+                "capabilities": {"experimentalApi": true}
             }
         });
         assert_eq!(initialize["method"], "initialize");
-        let config = json!({"method":"config/read","id":2,"params":{"includeLayers":true,"cwd":"/tmp"}});
+
+        let config = json!({
+            "method": "config/read",
+            "id": 2,
+            "params": {"includeLayers": true, "cwd": "/tmp"}
+        });
         assert_eq!(config["params"]["includeLayers"], true);
+
+        let skills = json!({
+            "method": "skills/list",
+            "id": 4,
+            "params": {"cwds": ["/tmp"], "forceReload": true}
+        });
+        assert_eq!(skills["params"]["forceReload"], true);
     }
 }
