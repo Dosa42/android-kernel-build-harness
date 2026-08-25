@@ -150,6 +150,19 @@ fn build_scan_roots(
     let cwd = env::current_dir().map_err(|error| format!("PHASE2_FAILED: cannot read CWD: {error}"))?;
     let project_root = find_project_root(&cwd);
 
+    // AGENTS.md and AGENTS.override.md are project documents, not .codex files.
+    // Phase 2 therefore scans the project tree itself as a candidate-discovery
+    // surface. Phase 3 later applies the exact root-to-CWD selection protocol.
+    add_root(
+        &mut roots,
+        project_root.clone().unwrap_or_else(|| cwd.clone()),
+        if project_root.is_some() {
+            "official_project_instruction_tree"
+        } else {
+            "official_current_directory_instruction_scope"
+        },
+    );
+
     for ancestor in cwd.ancestors() {
         if let Some(project_root) = project_root.as_deref() {
             if !ancestor.starts_with(project_root) {
