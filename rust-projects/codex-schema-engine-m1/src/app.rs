@@ -23,7 +23,7 @@ impl Default for SchemaEngineApp {
     fn default() -> Self {
         Self {
             input: String::new(),
-            result: "Enter one Codex configuration problem or question.".into(),
+            result: "Enter one Codex configuration problem or run the Milestone 2 pre-flight verifier.".into(),
             status: format!("Embedded schema: {} lines · {} bytes", schema::line_count(), schema::byte_count()),
             session: storage::load_session(),
             busy: false,
@@ -74,8 +74,8 @@ impl SchemaEngineApp {
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         self.busy = true;
-        self.status = "Pre-flight 1/2 — preparing full Linux Codex directory scan…".into();
-        self.result = "Pre-flight wizard running. Phase 2 will start only after Phase 1 completes and its discovered Codex directories pass hand-off verification.".into();
+        self.status = "Pre-flight 1/3 — preparing exhaustive Linux Codex directory discovery…".into();
+        self.result = "Milestone 2 verifier running. Phase 1 discovers directories; Phase 2 inventories protocol candidates; Phase 3 verifies syntax, precedence, activation and installed Codex runtime evidence.".into();
 
         std::thread::spawn(move || {
             let progress_tx = tx.clone();
@@ -125,16 +125,16 @@ impl SchemaEngineApp {
                 self.status = message;
             }
             Ok(AppEvent::PreflightFinished(Ok(report))) => {
-                logging::event("preflight", "wizard_completed");
+                logging::event("preflight", "milestone2_three_phase_completed");
                 self.result = report;
-                self.status = "Pre-flight 2/2 complete — Codex directories and important files inventoried.".into();
+                self.status = "Pre-flight 3/3 complete — discovery and protocol verification finished.".into();
                 self.busy = false;
                 self.rx = None;
             }
             Ok(AppEvent::PreflightFinished(Err(error))) => {
                 logging::event("preflight_error", &error);
                 self.result = format!("PREFLIGHT_FAILED\n{error}");
-                self.status = "Pre-flight failed; no partial result accepted.".into();
+                self.status = "Pre-flight failed; no fake success emitted.".into();
                 self.busy = false;
                 self.rx = None;
             }
@@ -176,15 +176,15 @@ impl eframe::App for SchemaEngineApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.columns(2, |cols| {
                 cols[0].heading("Embedded config-schema.json");
-                cols[0].label("Full schema is compiled into the application and sent as the Codex instructions field.");
+                cols[0].label("Full schema is compiled into the application and remains the structural config reference.");
                 cols[0].separator();
                 egui::ScrollArea::vertical().id_salt("schema").show(&mut cols[0], |ui| {
                     ui.add(egui::Label::new(self.schema_job.clone()).selectable(true));
                 });
 
-                cols[1].heading("Codex Pre-flight Wizard");
-                cols[1].label("Phase 1: whole-Linux Codex/.codex directory discovery. Phase 2: automatic filename discovery only inside the verified Codex trees.");
-                if cols[1].add_enabled(!self.busy, egui::Button::new("Run Pre-flight Wizard")).clicked() {
+                cols[1].heading("Milestone 2 — Codex Pre-flight Wizard");
+                cols[1].label("Phase 1: Linux Codex/.codex discovery. Phase 2: official filename/pattern inventory. Phase 3: syntax, location, precedence, instruction-chain, dynamic-path and installed-runtime verification.");
+                if cols[1].add_enabled(!self.busy, egui::Button::new("Run Milestone 2 Verifier")).clicked() {
                     self.start_preflight();
                 }
                 cols[1].separator();
@@ -194,14 +194,15 @@ impl eframe::App for SchemaEngineApp {
                 });
                 cols[1].separator();
                 cols[1].label("Schema question:");
-                cols[1].add(egui::TextEdit::multiline(&mut self.input).desired_rows(5).hint_text("Example: My PreToolUse hook never runs. What in the schema could explain this?"));
+                cols[1].add(egui::TextEdit::multiline(&mut self.input).desired_rows(5).hint_text("Example: Which effective Codex config layer controls this setting?"));
                 if cols[1].add_enabled(!self.busy && self.session.is_some() && !self.input.trim().is_empty(), egui::Button::new("Run Schema Engine")).clicked() {
                     self.start_query();
                 }
                 cols[1].separator();
                 cols[1].monospace(format!("model: {}", codex::MODEL));
-                cols[1].monospace("pre-flight: phase 1 directories -> verify -> phase 2 filenames");
-                cols[1].monospace("pre-flight file contents: not read");
+                cols[1].monospace("Milestone 2: Phase 1 -> Phase 2 -> Phase 3 verifier");
+                cols[1].monospace("Phase 3: deterministic code + installed Codex diagnostics");
+                cols[1].monospace("AI dependency for verification: none");
                 cols[1].monospace("store: false");
             });
         });
