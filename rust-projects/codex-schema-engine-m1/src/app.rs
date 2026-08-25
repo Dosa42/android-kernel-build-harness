@@ -1,4 +1,4 @@
-use crate::{codex, logging, oauth, schema, storage};
+use crate::{codex, logging, oauth, scanner, schema, storage};
 use eframe::egui;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
@@ -15,6 +15,8 @@ pub struct SchemaEngineApp {
 enum AppEvent {
     Login(Result<oauth::OAuthSession, String>),
     Answer(Result<String, String>, oauth::OAuthSession),
+    PreflightProgress(String),
+    PreflightFinished(Result<String, String>),
 }
 
 impl Default for SchemaEngineApp {
@@ -67,6 +69,23 @@ impl SchemaEngineApp {
         });
     }
 
+    fn start_preflight(&mut self) {
+        if self.busy { return; }
+        let (tx, rx) = mpsc::channel();
+        self.rx = Some(rx);
+        self.busy = true;
+        self.status = "Pre-flight 1/2 — preparing full Linux Codex directory scan…".into();
+        self.result = "Pre-flight wizard running. Phase 2 will start only after Phase 1 completes and its discovered Codex directories pass hand-off verification.".into();
+
+        std::thread::spawn(move || {
+            let progress_tx = tx.clone();
+            let result = scanner::run_preflight_wizard(|message| {
+                let _ = progress_tx.send(AppEvent::PreflightProgress(message));
+            });
+            let _ = tx.send(AppEvent::PreflightFinished(result));
+        });
+    }
+
     fn poll(&mut self) {
         let Some(rx) = &self.rx else { return };
         match rx.try_recv() {
@@ -99,6 +118,23 @@ impl SchemaEngineApp {
                 self.session = Some(session);
                 self.result = format!("ENGINE_FAILED\n{e}");
                 self.status = "Engine request failed.".into();
+                self.busy = false;
+                self.rx = None;
+            }
+            Ok(AppEvent::PreflightProgress(message)) => {
+                self.status = message;
+            }
+            Ok(AppEvent::PreflightFinished(Ok(report))) => {
+                logging::event("preflight", "wizard_completed");
+                self.result = report;
+                self.status = "Pre-flight 2/2 complete — Codex directories and important files inventoried.".into();
+                self.busy = false;
+                self.rx = None;
+            }
+            Ok(AppEvent::PreflightFinished(Err(error))) => {
+                logging::event("preflight_error", &error);
+                self.result = format!("PREFLIGHT_FAILED\n{error}");
+                self.status = "Pre-flight failed; no partial result accepted.".into();
                 self.busy = false;
                 self.rx = None;
             }
@@ -146,22 +182,26 @@ impl eframe::App for SchemaEngineApp {
                     ui.add(egui::Label::new(self.schema_job.clone()).selectable(true));
                 });
 
-                cols[1].heading("Result");
-                cols[1].label("One input → one schema-focused result. No tools, no RAG, no edit/write mode in Milestone 1.");
+                cols[1].heading("Codex Pre-flight Wizard");
+                cols[1].label("Phase 1: whole-Linux Codex/.codex directory discovery. Phase 2: automatic filename discovery only inside the verified Codex trees.");
+                if cols[1].add_enabled(!self.busy, egui::Button::new("Run Pre-flight Wizard")).clicked() {
+                    self.start_preflight();
+                }
                 cols[1].separator();
-                egui::ScrollArea::vertical().max_height(360.0).show(&mut cols[1], |ui| {
+                cols[1].heading("Result");
+                egui::ScrollArea::vertical().max_height(320.0).show(&mut cols[1], |ui| {
                     ui.add(egui::Label::new(egui::RichText::new(&self.result).monospace()).selectable(true));
                 });
                 cols[1].separator();
-                cols[1].label("Describe the Codex configuration problem or question in plain language:");
-                cols[1].add(egui::TextEdit::multiline(&mut self.input).desired_rows(6).hint_text("Example: My PreToolUse hook never runs. What in the schema could explain this?"));
+                cols[1].label("Schema question:");
+                cols[1].add(egui::TextEdit::multiline(&mut self.input).desired_rows(5).hint_text("Example: My PreToolUse hook never runs. What in the schema could explain this?"));
                 if cols[1].add_enabled(!self.busy && self.session.is_some() && !self.input.trim().is_empty(), egui::Button::new("Run Schema Engine")).clicked() {
                     self.start_query();
                 }
                 cols[1].separator();
                 cols[1].monospace(format!("model: {}", codex::MODEL));
-                cols[1].monospace("instructions: FULL embedded config-schema.json");
-                cols[1].monospace("tools: none");
+                cols[1].monospace("pre-flight: phase 1 directories -> verify -> phase 2 filenames");
+                cols[1].monospace("pre-flight file contents: not read");
                 cols[1].monospace("store: false");
             });
         });
