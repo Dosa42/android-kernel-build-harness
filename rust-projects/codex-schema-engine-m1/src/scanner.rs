@@ -8,7 +8,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-const SCANNER_VERSION: &str = "m2.1";
+const SCANNER_VERSION: &str = "m2.2";
 const READ_CHUNK: usize = 64 * 1024;
 const OVERLAP: usize = 256;
 
@@ -107,7 +107,7 @@ pub struct BlockedPath {
 
 pub fn scan_system_json() -> Result<String, String> {
     let report = scan_system();
-    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
+    serde_json::to_string_pretty(&report).map_err(|error| error.to_string())
 }
 
 pub fn scan_system() -> ScanReport {
@@ -123,10 +123,20 @@ pub fn scan_system() -> ScanReport {
         walk_root(root, &excluded, &mut state);
     }
 
-    state.hits.sort_by(|a, b| a.discovered_path.cmp(&b.discovered_path));
-    state.blocked.sort_by(|a, b| a.path.cmp(&b.path).then(a.operation.cmp(&b.operation)));
-    state.anchors.sort_by(|a, b| a.discovered_path.cmp(&b.discovered_path));
-    state.anchors.dedup_by(|a, b| a.discovered_path == b.discovered_path && a.found_by == b.found_by);
+    state
+        .hits
+        .sort_by(|left, right| left.discovered_path.cmp(&right.discovered_path));
+    state.blocked.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then(left.operation.cmp(&right.operation))
+    });
+    state
+        .anchors
+        .sort_by(|left, right| left.discovered_path.cmp(&right.discovered_path));
+    state.anchors.dedup_by(|left, right| {
+        left.discovered_path == right.discovered_path && left.found_by == right.found_by
+    });
 
     mark_duplicates(&mut state.hits);
     correlate_installations(&mut state.anchors, &mut state.hits);
@@ -137,7 +147,7 @@ pub fn scan_system() -> ScanReport {
     ScanReport {
         scanner_version: SCANNER_VERSION.to_owned(),
         elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-        roots: roots.iter().map(|p| display_path(p)).collect(),
+        roots: roots.iter().map(|path| display_path(path)).collect(),
         directories_seen: state.directories_seen,
         files_seen: state.files_seen,
         symlinks_seen: state.symlinks_seen,
@@ -165,6 +175,7 @@ struct ScanState {
 enum FileIdentity {
     #[cfg(unix)]
     Unix(u64, u64),
+    #[cfg(not(unix))]
     Path(PathBuf),
 }
 
@@ -206,6 +217,10 @@ fn discover_roots() -> Vec<PathBuf> {
         "XDG_DATA_HOME",
         "LOCALAPPDATA",
         "APPDATA",
+        "NPM_CONFIG_PREFIX",
+        "PNPM_HOME",
+        "CARGO_HOME",
+        "RUSTUP_HOME",
     ] {
         if let Some(value) = env::var_os(key) {
             let path = PathBuf::from(value);
@@ -235,9 +250,9 @@ fn discover_codex_anchors() -> Vec<CodexAnchor> {
     let mut anchors = Vec::new();
 
     if let Some(path_var) = env::var_os("PATH") {
-        for dir in env::split_paths(&path_var) {
+        for directory in env::split_paths(&path_var) {
             for name in codex_binary_names() {
-                let candidate = dir.join(name);
+                let candidate = directory.join(name);
                 if candidate.is_file() || candidate.is_symlink() {
                     anchors.push(anchor_from_path(candidate, "PATH"));
                 }
@@ -260,9 +275,9 @@ fn anchor_from_path(path: PathBuf, found_by: &str) -> CodexAnchor {
         discovered_path: display_path(&path),
         resolved_realpath: real.as_deref().map(display_path),
         found_by: found_by.to_owned(),
-        installation_root: guess.as_ref().map(|g| g.root.clone()),
-        installation_layout: guess.as_ref().map(|g| g.layout.clone()),
-        installation_evidence: guess.map(|g| g.evidence).unwrap_or_default(),
+        installation_root: guess.as_ref().map(|value| value.root.clone()),
+        installation_layout: guess.as_ref().map(|value| value.layout.clone()),
+        installation_evidence: guess.map(|value| value.evidence).unwrap_or_default(),
     }
 }
 
@@ -291,34 +306,34 @@ fn virtual_tree_exclusions() -> Vec<String> {
 fn walk_root(root: &Path, excluded: &HashSet<PathBuf>, state: &mut ScanState) {
     let mut stack = vec![root.to_path_buf()];
 
-    while let Some(dir) = stack.pop() {
-        if excluded.contains(&dir) {
+    while let Some(directory) = stack.pop() {
+        if excluded.contains(&directory) {
             continue;
         }
 
-        let metadata = match fs::symlink_metadata(&dir) {
+        let metadata = match fs::symlink_metadata(&directory) {
             Ok(value) => value,
             Err(error) => {
-                push_blocked(state, &dir, "metadata", &error);
+                push_blocked(state, &directory, "metadata", &error);
                 continue;
             }
         };
 
         if !metadata.is_dir() {
-            process_entry(&dir, metadata, state);
+            process_entry(&directory, metadata, state);
             continue;
         }
 
-        let id = file_identity(&dir, &metadata);
+        let id = file_identity(&directory, &metadata);
         if !state.visited_dirs.insert(id) {
             continue;
         }
         state.directories_seen += 1;
 
-        let entries = match fs::read_dir(&dir) {
+        let entries = match fs::read_dir(&directory) {
             Ok(value) => value,
             Err(error) => {
-                push_blocked(state, &dir, "read_dir", &error);
+                push_blocked(state, &directory, "read_dir", &error);
                 continue;
             }
         };
@@ -327,7 +342,7 @@ fn walk_root(root: &Path, excluded: &HashSet<PathBuf>, state: &mut ScanState) {
         for entry in entries {
             match entry {
                 Ok(value) => children.push(value.path()),
-                Err(error) => push_blocked(state, &dir, "read_dir_entry", &error),
+                Err(error) => push_blocked(state, &directory, "read_dir_entry", &error),
             }
         }
         children.sort();
@@ -404,8 +419,12 @@ fn process_regular_file(
 
     let path_codex = path_lower.contains("codex") || real_lower.contains("codex");
     let path_schema = path_has_schema_signal(&path_lower) || path_has_schema_signal(&real_lower);
-    let content_codex = signatures.iter().any(|signature| is_codex_signature(signature));
-    let content_schema = signatures.iter().any(|signature| is_schema_signature(signature));
+    let content_codex = signatures
+        .iter()
+        .any(|signature| is_codex_signature(signature));
+    let content_schema = signatures
+        .iter()
+        .any(|signature| is_schema_signature(signature));
 
     let classification = if (path_codex && (path_schema || content_schema))
         || (content_codex && content_schema)
@@ -469,7 +488,7 @@ fn process_regular_file(
 }
 
 fn correlate_installations(anchors: &mut [CodexAnchor], hits: &mut [ScanHit]) {
-    for anchor in anchors {
+    for anchor in anchors.iter_mut() {
         let path = anchor
             .resolved_realpath
             .as_deref()
@@ -481,7 +500,7 @@ fn correlate_installations(anchors: &mut [CodexAnchor], hits: &mut [ScanHit]) {
         }
     }
 
-    for hit in hits {
+    for hit in hits.iter_mut() {
         if let Some(guess) = infer_installation(Path::new(&hit.resolved_realpath)) {
             hit.installation_root = Some(guess.root);
             hit.installation_layout = Some(guess.layout);
@@ -492,17 +511,19 @@ fn correlate_installations(anchors: &mut [CodexAnchor], hits: &mut [ScanHit]) {
     let anchor_roots: Vec<(String, String)> = anchors
         .iter()
         .filter_map(|anchor| {
-            Some((
-                anchor.installation_root.clone()?,
-                anchor
-                    .installation_layout
-                    .clone()
-                    .unwrap_or_else(|| "unknown".into()),
-            ))
+            let root = anchor.installation_root.clone()?;
+            let layout = anchor
+                .installation_layout
+                .clone()
+                .unwrap_or_else(|| "unknown".into());
+            Some((root, layout))
         })
         .collect();
 
-    for hit in hits.iter_mut().filter(|hit| hit.installation_root.is_none()) {
+    for hit in hits
+        .iter_mut()
+        .filter(|hit| hit.installation_root.is_none())
+    {
         let hit_path = Path::new(&hit.resolved_realpath);
         if let Some((root, layout)) = anchor_roots
             .iter()
@@ -527,7 +548,10 @@ fn infer_installation(path: &Path) -> Option<InstallationGuess> {
         .map(|component| component.to_string_lossy().to_ascii_lowercase())
         .collect();
 
-    if let Some(index) = lowered.iter().position(|component| component == "node_modules") {
+    if let Some(index) = lowered
+        .iter()
+        .position(|component| component == "node_modules")
+    {
         let mut package_end = index.saturating_add(1);
         if lowered
             .get(package_end)
@@ -552,7 +576,10 @@ fn infer_installation(path: &Path) -> Option<InstallationGuess> {
     }
 
     if let Some(index) = lowered.iter().position(|component| component == "cellar") {
-        if lowered.get(index + 1).is_some_and(|component| component.contains("codex")) {
+        if lowered
+            .get(index + 1)
+            .is_some_and(|component| component.contains("codex"))
+        {
             let end = (index + 2).min(components.len().saturating_sub(1));
             return Some(InstallationGuess {
                 root: display_path(&path_through_component(&components, end)),
@@ -562,7 +589,10 @@ fn infer_installation(path: &Path) -> Option<InstallationGuess> {
         }
     }
 
-    if lowered.windows(2).any(|pair| pair == [".cargo", "bin"]) {
+    if lowered
+        .windows(2)
+        .any(|pair| pair[0] == ".cargo" && pair[1] == "bin")
+    {
         if let Some(index) = lowered.iter().position(|component| component == ".cargo") {
             return Some(InstallationGuess {
                 root: display_path(&path_through_component(&components, index)),
@@ -631,8 +661,7 @@ fn infer_installation(path: &Path) -> Option<InstallationGuess> {
 fn nearest_manifest_root(path: &Path) -> Option<(PathBuf, String, Vec<String>)> {
     let start = if path.is_dir() { path } else { path.parent()? };
     for ancestor in start.ancestors() {
-        let package_json = ancestor.join("package.json");
-        if package_json.is_file() {
+        if ancestor.join("package.json").is_file() {
             return Some((
                 ancestor.to_path_buf(),
                 "node_package_tree".into(),
@@ -640,8 +669,7 @@ fn nearest_manifest_root(path: &Path) -> Option<(PathBuf, String, Vec<String>)> 
             ));
         }
 
-        let cargo_toml = ancestor.join("Cargo.toml");
-        if cargo_toml.is_file() {
+        if ancestor.join("Cargo.toml").is_file() {
             return Some((
                 ancestor.to_path_buf(),
                 "cargo_project_tree".into(),
@@ -649,8 +677,7 @@ fn nearest_manifest_root(path: &Path) -> Option<(PathBuf, String, Vec<String>)> 
             ));
         }
 
-        let pyproject = ancestor.join("pyproject.toml");
-        if pyproject.is_file() {
+        if ancestor.join("pyproject.toml").is_file() {
             return Some((
                 ancestor.to_path_buf(),
                 "python_project_tree".into(),
@@ -687,17 +714,26 @@ fn looks_like_file_name(component: &str) -> bool {
 }
 
 fn discover_relations(hits: &[ScanHit], blocked: &mut Vec<BlockedPath>) -> Vec<FileRelation> {
-    let mut target_tokens: Vec<(String, String)> = Vec::new();
-    let mut seen_tokens = HashSet::new();
+    let mut targets: Vec<(String, String, String, Option<String>)> = Vec::new();
+    let mut seen_targets = HashSet::new();
 
     for hit in hits {
         let path = Path::new(&hit.resolved_realpath);
-        let Some(file_name) = path.file_name().map(|value| value.to_string_lossy().to_string()) else {
+        let Some(file_name) = path
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+        else {
             continue;
         };
         let token = file_name.to_ascii_lowercase();
-        if relation_worthy_filename(&token) && seen_tokens.insert((token.clone(), hit.discovered_path.clone())) {
-            target_tokens.push((token, hit.discovered_path.clone()));
+        let identity = (token.clone(), hit.resolved_realpath.clone());
+        if relation_worthy_filename(&token) && seen_targets.insert(identity) {
+            targets.push((
+                token,
+                hit.discovered_path.clone(),
+                hit.resolved_realpath.clone(),
+                hit.installation_root.clone(),
+            ));
         }
     }
 
@@ -706,23 +742,67 @@ fn discover_relations(hits: &[ScanHit], blocked: &mut Vec<BlockedPath>) -> Vec<F
 
     for source in hits {
         let source_path = Path::new(&source.discovered_path);
-        let candidates: Vec<(&[u8], &str, &str)> = target_tokens
+        let candidates: Vec<(&[u8], &str, &str)> = targets
             .iter()
-            .filter(|(_, target_path)| target_path != &&source.discovered_path)
-            .map(|(token, target_path)| (token.as_bytes(), token.as_str(), target_path.as_str()))
+            .filter(|(token, target_path, target_realpath, target_root)| {
+                if target_path == &source.discovered_path
+                    || target_realpath == &source.resolved_realpath
+                {
+                    return false;
+                }
+
+                let global_matches = targets
+                    .iter()
+                    .filter(|(other_token, other_path, other_realpath, _)| {
+                        other_token == token
+                            && other_path != &source.discovered_path
+                            && other_realpath != &source.resolved_realpath
+                    })
+                    .count();
+                if global_matches == 1 {
+                    return true;
+                }
+
+                let Some(source_root) = source.installation_root.as_deref() else {
+                    return false;
+                };
+                if target_root.as_deref() != Some(source_root) {
+                    return false;
+                }
+
+                targets
+                    .iter()
+                    .filter(|(other_token, other_path, other_realpath, other_root)| {
+                        other_token == token
+                            && other_path != &source.discovered_path
+                            && other_realpath != &source.resolved_realpath
+                            && other_root.as_deref() == Some(source_root)
+                    })
+                    .count()
+                    == 1
+            })
+            .map(|(token, target_path, _, _)| {
+                (token.as_bytes(), token.as_str(), target_path.as_str())
+            })
             .collect();
 
         if !candidates.is_empty() {
             match find_tokens_in_file(source_path, &candidates) {
                 Ok(found) => {
                     for (token, target_path) in found {
-                        let key = (source.discovered_path.clone(), target_path.clone(), "direct_text_reference");
+                        let key = (
+                            source.discovered_path.clone(),
+                            target_path.clone(),
+                            "direct_text_reference",
+                        );
                         if seen_relations.insert(key) {
                             relations.push(FileRelation {
                                 from_path: source.discovered_path.clone(),
                                 to_path: target_path,
                                 relation: "direct_text_reference".into(),
-                                evidence: format!("source bytes contain target filename: {token}"),
+                                evidence: format!(
+                                    "source bytes contain unambiguous target filename: {token}"
+                                ),
                             });
                         }
                     }
@@ -739,7 +819,11 @@ fn discover_relations(hits: &[ScanHit], blocked: &mut Vec<BlockedPath>) -> Vec<F
 
     for hit in hits {
         if let Some(duplicate) = &hit.duplicate_of {
-            let key = (hit.discovered_path.clone(), duplicate.clone(), "same_content");
+            let key = (
+                hit.discovered_path.clone(),
+                duplicate.clone(),
+                "same_content",
+            );
             if seen_relations.insert(key) {
                 relations.push(FileRelation {
                     from_path: hit.discovered_path.clone(),
@@ -751,11 +835,11 @@ fn discover_relations(hits: &[ScanHit], blocked: &mut Vec<BlockedPath>) -> Vec<F
         }
     }
 
-    relations.sort_by(|a, b| {
-        a.from_path
-            .cmp(&b.from_path)
-            .then(a.to_path.cmp(&b.to_path))
-            .then(a.relation.cmp(&b.relation))
+    relations.sort_by(|left, right| {
+        left.from_path
+            .cmp(&right.from_path)
+            .then(left.to_path.cmp(&right.to_path))
+            .then(left.relation.cmp(&right.relation))
     });
     relations
 }
@@ -830,7 +914,9 @@ fn apply_relations(relations: &[FileRelation], hits: &mut [ScanHit]) {
             hits[*position].references.push(relation.to_path.clone());
         }
         if let Some(position) = index.get(&relation.to_path) {
-            hits[*position].referenced_by.push(relation.from_path.clone());
+            hits[*position]
+                .referenced_by
+                .push(relation.from_path.clone());
         }
     }
 
@@ -917,7 +1003,7 @@ fn build_installation_groups(
         });
     }
 
-    groups.sort_by(|a, b| a.root.cmp(&b.root));
+    groups.sort_by(|left, right| left.root.cmp(&right.root));
     groups
 }
 
@@ -1013,7 +1099,9 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.len() > haystack.len() {
         return false;
     }
-    haystack.windows(needle.len()).any(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 fn sha256_file(path: &Path) -> io::Result<String> {
@@ -1047,24 +1135,29 @@ fn mark_duplicates(hits: &mut [ScanHit]) {
     }
 }
 
-fn file_identity(path: &Path, metadata: &Metadata) -> FileIdentity {
+fn file_identity(_path: &Path, metadata: &Metadata) -> FileIdentity {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        return FileIdentity::Unix(metadata.dev(), metadata.ino());
+        FileIdentity::Unix(metadata.dev(), metadata.ino())
     }
-    #[allow(unreachable_code)]
-    FileIdentity::Path(fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+    #[cfg(not(unix))]
+    {
+        FileIdentity::Path(fs::canonicalize(_path).unwrap_or_else(|_| _path.to_path_buf()))
+    }
 }
 
 fn metadata_device_inode(metadata: &Metadata) -> (Option<u64>, Option<u64>) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        return (Some(metadata.dev()), Some(metadata.ino()));
+        (Some(metadata.dev()), Some(metadata.ino()))
     }
-    #[allow(unreachable_code)]
-    (None, None)
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        (None, None)
+    }
 }
 
 fn push_blocked(state: &mut ScanState, path: &Path, operation: &str, error: &io::Error) {
