@@ -1,5 +1,6 @@
 mod phase2;
 mod phase3;
+mod refine;
 
 use serde::Serialize;
 use std::collections::{BTreeSet, HashSet, VecDeque};
@@ -102,9 +103,10 @@ where
     ));
 
     progress("Pre-flight 3/3 — deterministic protocol, syntax, precedence and runtime verification…".into());
-    let phase3 = phase3::verify(&phase1, &phase2)?;
+    let mut phase3 = phase3::verify(&phase1, &phase2)?;
+    refine::refine(&mut phase3, &phase2);
     progress(format!(
-        "Pre-flight 3/3 complete — {} verdict(s), {} runtime diagnostic(s).",
+        "Pre-flight 3/3 complete — {} refined verdict(s), {} runtime diagnostic(s).",
         phase3.verdicts.len(),
         phase3.runtime_diagnostics.len()
     ));
