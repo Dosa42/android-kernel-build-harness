@@ -58,18 +58,20 @@ fn collect_specs(snapshot: &AppServerSnapshot, layers: &[RuntimeConfigLayer]) ->
         }
     }
 
-    // Agent roles are merged by role name. Walking low-to-high and overwriting
-    // the map implements the same effective-role selection without guessing a
-    // filename in Phase 2.
+    // App Server config/read returns layers high-to-low. The first active
+    // declaration of a role name is therefore the winning declaration.
     let mut roles = BTreeMap::<String, (&RuntimeConfigLayer, String)>::new();
     for layer in layers.iter().filter(|layer| layer.active) {
         let Some(agents) = layer.raw_config.get("agents").and_then(JsonValue::as_object) else {
             continue;
         };
         for (role_name, role) in agents {
-            if let Some(config_file) = role.get("config_file").and_then(JsonValue::as_str) {
-                roles.insert(role_name.clone(), (layer, config_file.to_owned()));
-            }
+            let Some(config_file) = role.get("config_file").and_then(JsonValue::as_str) else {
+                continue;
+            };
+            roles
+                .entry(role_name.clone())
+                .or_insert((layer, config_file.to_owned()));
         }
     }
     for (role_name, (layer, value)) in roles {
@@ -115,9 +117,10 @@ fn highest_active_layer_value<'a>(
     layers: &'a [RuntimeConfigLayer],
     key: &str,
 ) -> Option<(&'a RuntimeConfigLayer, &'a JsonValue)> {
+    // config/read exposes all_layers_high_to_low(), so the first active layer
+    // containing the key is authoritative for scalar path settings.
     layers
         .iter()
-        .rev()
         .filter(|layer| layer.active)
         .find_map(|layer| layer.raw_config.get(key).map(|value| (layer, value)))
 }
