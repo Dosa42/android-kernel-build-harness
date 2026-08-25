@@ -137,6 +137,8 @@ fn find_project_root_from_markers(cwd: &Path, markers: &[String]) -> PathBuf {
 }
 
 fn derive_project_trust(context: &RuntimeContext, layers: &[RuntimeConfigLayer]) -> ProjectTrust {
+    // Project config layers expose disabledReason when trust prevents them from
+    // participating. This is the strongest direct signal when a .codex layer exists.
     let chain = path_chain(&context.project_root, &context.cwd);
     let applicable = layers
         .iter()
@@ -152,12 +154,76 @@ fn derive_project_trust(context: &RuntimeContext, layers: &[RuntimeConfigLayer])
         .collect::<Vec<_>>();
 
     if applicable.iter().any(|layer| layer.disabled_reason.is_some()) {
-        ProjectTrust::Untrusted
-    } else if !applicable.is_empty() {
-        ProjectTrust::Trusted
-    } else {
-        ProjectTrust::Unknown
+        return ProjectTrust::Untrusted;
     }
+    if !applicable.is_empty() {
+        return ProjectTrust::Trusted;
+    }
+
+    // Codex can still have an explicit project trust entry when no project
+    // .codex/config.toml exists. Its loader checks resolved CWD first, then the
+    // resolved Git repo root. Mirror exactly that lookup order on the active
+    // base user config layer.
+    let user_layer = layers
+        .iter()
+        .find(|layer| layer.source_type == "user" && layer.active && layer.profile.is_none())
+        .or_else(|| layers.iter().find(|layer| layer.source_type == "user" && layer.active));
+    let Some(projects) = user_layer
+        .and_then(|layer| layer.raw_config.get("projects"))
+        .and_then(JsonValue::as_object)
+    else {
+        return ProjectTrust::Unknown;
+    };
+
+    let mut lookup_paths = normalized_lookup_paths(&context.cwd);
+    if let Some(repo_root) = git_repo_root(&context.cwd) {
+        for path in normalized_lookup_paths(&repo_root) {
+            if !lookup_paths.iter().any(|existing| existing == &path) {
+                lookup_paths.push(path);
+            }
+        }
+    }
+
+    for key in lookup_paths {
+        let Some(project) = projects.get(&key).and_then(JsonValue::as_object) else {
+            continue;
+        };
+        match project.get("trust_level").and_then(JsonValue::as_str) {
+            Some("trusted") => return ProjectTrust::Trusted,
+            Some("untrusted") => return ProjectTrust::Untrusted,
+            _ => {}
+        }
+    }
+
+    ProjectTrust::Unknown
+}
+
+fn normalized_lookup_paths(path: &Path) -> Vec<String> {
+    let raw = path.to_string_lossy().to_string();
+    let canonical = fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    if raw == canonical {
+        vec![canonical]
+    } else {
+        vec![canonical, raw]
+    }
+}
+
+fn git_repo_root(cwd: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let value = text.trim();
+    (!value.is_empty()).then(|| PathBuf::from(value))
 }
 
 pub(super) fn verify_phase1(
@@ -270,7 +336,7 @@ pub(super) fn add_config_layer_verdicts(
         }
 
         let mut details = vec![format!(
-            "App Server config/read layer order={} source={}",
+            "App Server config/read layer order={} (high-to-low) source={}",
             layer.runtime_order, layer.source_type
         )];
         if let Some(reason) = &layer.disabled_reason {
@@ -283,12 +349,16 @@ pub(super) fn add_config_layer_verdicts(
                 let check = schema_check::validate_config(&value);
                 if check.valid {
                     states.push(VerificationState::SchemaValid);
-                    if layer.active {
-                        states.push(VerificationState::Effective);
-                    }
                 } else {
                     states.push(VerificationState::SchemaInvalid);
+                    details.push("Current embedded OpenAI schema disagrees with this file; runtime activation below remains authoritative for the installed Codex version.".into());
                     details.extend(check.errors.into_iter().take(20));
+                }
+                // config/read already proved that this physical layer is loaded by
+                // the installed runtime. Current-schema disagreement is therefore
+                // reported separately rather than falsely negating runtime state.
+                if layer.active {
+                    states.push(VerificationState::Effective);
                 }
             }
             Err(error) => {
