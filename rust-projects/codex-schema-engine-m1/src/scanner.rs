@@ -21,7 +21,6 @@ const IMPORTANT_FILE_NAMES: &[&[u8]] = &[
     b"SKILL.md",
     b"hooks.json",
     b"auth.json",
-    b".credentials.json",
     b"history.jsonl",
     b"pet.json",
     b"config-schema.json",
