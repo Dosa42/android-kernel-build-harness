@@ -2,6 +2,16 @@ name: Build Codex Schema Engine M1
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "rust-projects/codex-schema-engine-m1/**"
+      - ".github/workflows/build-codex-schema-engine.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "rust-projects/codex-schema-engine-m1/**"
+      - ".github/workflows/build-codex-schema-engine.yml"
 
 permissions:
   contents: read
