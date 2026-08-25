@@ -12,7 +12,7 @@ use super::phase2::Phase2Result;
 use super::Phase1Result;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Phase3Result {
@@ -177,6 +177,7 @@ pub(crate) fn verify(phase1: &Phase1Result, phase2: &Phase2Result) -> Result<Pha
     )?;
     instructions::add_missing_discovery_verdicts(&instruction_chain, phase2, &mut verdicts);
     dynamic::add_verdicts(&dynamic_targets, &mut verdicts);
+    reconcile_runtime_config_verdicts(&config_layers, &mut verdicts);
 
     verdicts.sort_by(|left, right| {
         left.subject
@@ -194,6 +195,38 @@ pub(crate) fn verify(phase1: &Phase1Result, phase2: &Phase2Result) -> Result<Pha
         verdicts,
         runtime_diagnostics,
     })
+}
+
+fn reconcile_runtime_config_verdicts(
+    layers: &[RuntimeConfigLayer],
+    verdicts: &mut [Verdict],
+) {
+    for verdict in verdicts.iter_mut().filter(|verdict| {
+        verdict.kind == "ConfigToml" || verdict.kind == "ProfileConfigToml"
+    }) {
+        let path = Path::new(&verdict.subject);
+        let Some(layer) = layers
+            .iter()
+            .find(|layer| layer.source_path.as_deref() == Some(path))
+        else {
+            continue;
+        };
+        if layer.active
+            && verdict.states.contains(&VerificationState::SyntaxValid)
+            && !verdict.states.contains(&VerificationState::InvalidNameCase)
+        {
+            verdict.states.push(VerificationState::RuntimeConfirmed);
+            verdict.states.push(VerificationState::LayerActive);
+            verdict.states.push(VerificationState::Effective);
+            if verdict.states.contains(&VerificationState::SchemaInvalid) {
+                verdict.details.push(
+                    "Installed Codex runtime loaded this active layer; embedded current-schema disagreement is reported separately as version/schema skew."
+                        .into(),
+                );
+            }
+            normalize_states(&mut verdict.states);
+        }
+    }
 }
 
 fn normalize_states(states: &mut Vec<VerificationState>) {
