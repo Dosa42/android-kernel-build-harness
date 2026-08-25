@@ -66,7 +66,7 @@ pub(crate) fn refine(result: &mut Phase3Result, phase2: &Phase2Result) {
             }
             CandidateKind::PluginHooksJson => {
                 let plugin_enabled = plugin_root_for(path)
-                    .is_some_and(|root| plugin_roots.contains(root));
+                    .is_some_and(|root| plugin_roots.contains(&root));
                 if plugin_enabled {
                     push_state(&mut verdict.states, VerificationState::RuntimeConfirmed);
                 } else if plugins.is_some() {
@@ -90,7 +90,7 @@ pub(crate) fn refine(result: &mut Phase3Result, phase2: &Phase2Result) {
                 refine_rule(verdict, path, syntax_ok, name_ok, &result.config_layers);
             }
             CandidateKind::SkillMd => {
-                let plugin_ok = plugin_root_for(path).map(|root| plugin_roots.contains(root));
+                let plugin_ok = plugin_root_for(path).map(|root| plugin_roots.contains(&root));
                 let enabled = !disabled_skills.contains(path);
                 if syntax_ok && location_ok && name_ok && enabled && plugin_ok != Some(false) {
                     if plugin_ok == Some(true) {
@@ -109,7 +109,7 @@ pub(crate) fn refine(result: &mut Phase3Result, phase2: &Phase2Result) {
                 let enabled = skill_md
                     .as_deref()
                     .is_some_and(|skill| skill.is_file() && !disabled_skills.contains(skill));
-                let plugin_ok = plugin_root_for(path).map(|root| plugin_roots.contains(root));
+                let plugin_ok = plugin_root_for(path).map(|root| plugin_roots.contains(&root));
                 if syntax_ok && location_ok && name_ok && enabled && plugin_ok != Some(false) {
                     if plugin_ok == Some(true) {
                         push_state(&mut verdict.states, VerificationState::RuntimeConfirmed);
@@ -119,7 +119,7 @@ pub(crate) fn refine(result: &mut Phase3Result, phase2: &Phase2Result) {
             }
             CandidateKind::PluginManifestJson => {
                 if let Some(root) = plugin_root_for(path) {
-                    if plugin_roots.contains(root) && syntax_ok && name_ok {
+                    if plugin_roots.contains(&root) && syntax_ok && name_ok {
                         push_state(&mut verdict.states, VerificationState::RuntimeConfirmed);
                         push_state(&mut verdict.states, VerificationState::Effective);
                     } else if plugins.is_some() {
@@ -128,7 +128,7 @@ pub(crate) fn refine(result: &mut Phase3Result, phase2: &Phase2Result) {
                 }
             }
             CandidateKind::PluginAppJson | CandidateKind::PluginMcpJson => {
-                if plugin_root_for(path).is_some_and(|root| plugin_roots.contains(root))
+                if plugin_root_for(path).is_some_and(|root| plugin_roots.contains(&root))
                     && syntax_ok
                     && location_ok
                     && name_ok
@@ -197,10 +197,11 @@ fn refine_dynamic_targets(result: &mut Phase3Result) {
         if !source_active || !target.exists || target.syntax_valid != Some(true) {
             continue;
         }
+        let target_subject = target.resolved_path.display().to_string();
         for verdict in result
             .verdicts
             .iter_mut()
-            .filter(|verdict| verdict.kind == "dynamic_config_target" && verdict.subject == target.resolved_path.display().to_string())
+            .filter(|verdict| verdict.kind == "dynamic_config_target" && verdict.subject == target_subject)
         {
             push_state(&mut verdict.states, VerificationState::LocationRecognized);
             push_state(&mut verdict.states, VerificationState::LayerActive);
@@ -294,8 +295,10 @@ fn feature_state(diagnostics: &[RuntimeDiagnostic], feature: &str) -> Option<boo
     let feature_lower = feature.to_ascii_lowercase();
     for line in diagnostic.stdout.lines() {
         let lower = line.to_ascii_lowercase();
-        let words = lower.split(|character: char| !character.is_ascii_alphanumeric() && character != '_' && character != '-').collect::<Vec<_>>();
-        if !words.iter().any(|word| *word == feature_lower) {
+        let words = lower
+            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_' && character != '-')
+            .collect::<Vec<_>>();
+        if !words.iter().any(|word| *word == feature_lower.as_str()) {
             continue;
         }
         if words.iter().any(|word| matches!(*word, "true" | "enabled" | "on")) {
@@ -323,8 +326,7 @@ fn disabled_skill_paths(layers: &[ConfigLayer]) -> BTreeSet<PathBuf> {
                 continue;
             }
             let Some(path) = table.get("path").and_then(TomlValue::as_str) else { continue };
-            let path = resolve_from_layer(&layer.path, path);
-            disabled.insert(path);
+            disabled.insert(resolve_from_layer(&layer.path, path));
         }
     }
     disabled
@@ -366,7 +368,9 @@ fn hook_trust_from_doctor(value: Option<&JsonValue>, path: &Path) -> Option<bool
     let needle = path.to_string_lossy();
     let mut answer = None;
     visit_objects(value, &mut |object| {
-        let mentions = object.values().any(|value| value.as_str().is_some_and(|text| text.contains(needle.as_ref())));
+        let mentions = object
+            .values()
+            .any(|value| value.as_str().is_some_and(|text| text.contains(needle.as_ref())));
         if !mentions {
             return;
         }
@@ -426,9 +430,15 @@ fn visit_objects(value: &JsonValue, callback: &mut impl FnMut(&serde_json::Map<S
 
 fn apply_layer_state(verdict: &mut super::phase3::Verdict, layer: &ConfigLayer) {
     match layer.activation {
-        Activation::Active | Activation::RuntimeConfirmed => push_state(&mut verdict.states, VerificationState::LayerActive),
-        Activation::Inactive | Activation::RuntimeRejected => push_state(&mut verdict.states, VerificationState::LayerInactive),
-        Activation::TrustUnconfirmed => push_state(&mut verdict.states, VerificationState::TrustUnconfirmed),
+        Activation::Active | Activation::RuntimeConfirmed => {
+            push_state(&mut verdict.states, VerificationState::LayerActive)
+        }
+        Activation::Inactive | Activation::RuntimeRejected => {
+            push_state(&mut verdict.states, VerificationState::LayerInactive)
+        }
+        Activation::TrustUnconfirmed => {
+            push_state(&mut verdict.states, VerificationState::TrustUnconfirmed)
+        }
     }
     if layer.version_valid == Some(true) {
         push_state(&mut verdict.states, VerificationState::VersionValid);
