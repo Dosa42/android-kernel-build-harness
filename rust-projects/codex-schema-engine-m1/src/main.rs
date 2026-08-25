@@ -2,7 +2,7 @@ mod app;
 mod codex;
 mod logging;
 mod oauth;
-#[path = "scanner_m2.rs"]
+#[path = "scanner_m2_v2.rs"]
 mod scanner;
 mod schema;
 mod storage;
