@@ -2,7 +2,6 @@ mod app;
 mod codex;
 mod logging;
 mod oauth;
-mod scanner;
 mod schema;
 mod storage;
 
