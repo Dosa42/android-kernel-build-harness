@@ -18,6 +18,15 @@ pub(crate) fn validate_config(value: &TomlValue) -> SchemaCheck {
         }
     };
 
+    let mut errors = Vec::new();
+    audit_supported_schema_keywords(&root, "$schema", &mut errors);
+    if !errors.is_empty() {
+        return SchemaCheck {
+            valid: false,
+            errors,
+        };
+    }
+
     let instance = match serde_json::to_value(value) {
         Ok(value) => value,
         Err(error) => {
@@ -28,11 +37,92 @@ pub(crate) fn validate_config(value: &TomlValue) -> SchemaCheck {
         }
     };
 
-    let mut errors = Vec::new();
     validate_node(&root, &instance, &root, "$", &mut errors);
     SchemaCheck {
         valid: errors.is_empty(),
         errors,
+    }
+}
+
+fn audit_supported_schema_keywords(schema: &JsonValue, path: &str, errors: &mut Vec<String>) {
+    if schema.is_boolean() {
+        return;
+    }
+    let Some(object) = schema.as_object() else {
+        errors.push(format!("{path}: schema node is neither object nor boolean"));
+        return;
+    };
+
+    const SUPPORTED: &[&str] = &[
+        "$schema",
+        "$ref",
+        "definitions",
+        "title",
+        "description",
+        "default",
+        "type",
+        "enum",
+        "allOf",
+        "anyOf",
+        "oneOf",
+        "not",
+        "properties",
+        "additionalProperties",
+        "required",
+        "items",
+        "minimum",
+        "maximum",
+        "minLength",
+        "maxLength",
+        "pattern",
+        "format",
+    ];
+
+    for key in object.keys() {
+        if !SUPPORTED.contains(&key.as_str()) {
+            errors.push(format!(
+                "{path}: embedded schema uses unsupported validation keyword `{key}`; verifier refuses to silently ignore it"
+            ));
+        }
+    }
+
+    for collection in ["definitions", "properties"] {
+        if let Some(children) = object.get(collection).and_then(JsonValue::as_object) {
+            for (name, child) in children {
+                audit_supported_schema_keywords(
+                    child,
+                    &format!("{path}/{collection}/{name}"),
+                    errors,
+                );
+            }
+        }
+    }
+
+    if let Some(additional) = object.get("additionalProperties") {
+        if !additional.is_boolean() {
+            audit_supported_schema_keywords(
+                additional,
+                &format!("{path}/additionalProperties"),
+                errors,
+            );
+        }
+    }
+    if let Some(items) = object.get("items") {
+        audit_supported_schema_keywords(items, &format!("{path}/items"), errors);
+    }
+    if let Some(negative) = object.get("not") {
+        audit_supported_schema_keywords(negative, &format!("{path}/not"), errors);
+    }
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        if let Some(branches) = object.get(keyword).and_then(JsonValue::as_array) {
+            for (index, branch) in branches.iter().enumerate() {
+                audit_supported_schema_keywords(
+                    branch,
+                    &format!("{path}/{keyword}/{index}"),
+                    errors,
+                );
+            }
+        }
     }
 }
 
@@ -43,10 +133,15 @@ fn validate_node(
     path: &str,
     errors: &mut Vec<String>,
 ) {
-    let Some(schema_object) = schema.as_object() else {
-        if schema == &JsonValue::Bool(false) {
+    if let Some(allowed) = schema.as_bool() {
+        if !allowed {
             errors.push(format!("{path}: schema rejects this value"));
         }
+        return;
+    }
+
+    let Some(schema_object) = schema.as_object() else {
+        errors.push(format!("{path}: invalid schema node"));
         return;
     };
 
@@ -80,6 +175,13 @@ fn validate_node(
             errors.push(format!(
                 "{path}: value must match exactly one schema branch, matched {matches}"
             ));
+            return;
+        }
+    }
+
+    if let Some(negative) = schema_object.get("not") {
+        if branch_matches(negative, instance, root, path) {
+            errors.push(format!("{path}: value matches a forbidden `not` schema"));
             return;
         }
     }
@@ -186,20 +288,23 @@ fn validate_number_constraints(
     }
 
     if let Some(format) = schema.get("format").and_then(JsonValue::as_str) {
-        match format {
-            "uint" | "uint16" | "uint32" | "uint64" if number < 0.0 => {
-                errors.push(format!("{path}: {format} cannot be negative"));
-            }
-            "uint16" if number > u16::MAX as f64 => {
-                errors.push(format!("{path}: value exceeds uint16 range"));
-            }
-            "uint32" if number > u32::MAX as f64 => {
-                errors.push(format!("{path}: value exceeds uint32 range"));
-            }
-            "int32" if number < i32::MIN as f64 || number > i32::MAX as f64 => {
-                errors.push(format!("{path}: value exceeds int32 range"));
-            }
-            _ => {}
+        let valid = match format {
+            "uint" | "uint64" => instance.as_u64().is_some(),
+            "uint32" => instance
+                .as_u64()
+                .is_some_and(|value| u32::try_from(value).is_ok()),
+            "uint16" => instance
+                .as_u64()
+                .is_some_and(|value| u16::try_from(value).is_ok()),
+            "int64" => instance.as_i64().is_some(),
+            "int32" => instance
+                .as_i64()
+                .is_some_and(|value| i32::try_from(value).is_ok()),
+            "double" => instance.is_number(),
+            _ => false,
+        };
+        if !valid {
+            errors.push(format!("{path}: value does not satisfy numeric format `{format}`"));
         }
     }
 }
@@ -238,7 +343,12 @@ fn validate_string_constraints(
     }
 }
 
-fn matches_any_branch(branches: &[JsonValue], instance: &JsonValue, root: &JsonValue, path: &str) -> bool {
+fn matches_any_branch(
+    branches: &[JsonValue],
+    instance: &JsonValue,
+    root: &JsonValue,
+    path: &str,
+) -> bool {
     branches
         .iter()
         .any(|branch| branch_matches(branch, instance, root, path))
@@ -264,7 +374,7 @@ fn type_matches(expected: &str, value: &JsonValue) -> bool {
         "number" => value.is_number(),
         "boolean" => value.is_boolean(),
         "null" => value.is_null(),
-        _ => true,
+        _ => false,
     }
 }
 
@@ -305,6 +415,19 @@ mod tests {
         let value: TomlValue = "definitely_not_a_codex_key = true"
             .parse()
             .expect("test TOML");
+        let result = validate_config(&value);
+        assert!(!result.valid);
+    }
+
+    #[test]
+    fn enforces_shell_environment_policy_not_constraints() {
+        let value: TomlValue = r#"
+[shell_environment_policy]
+exclude = ["A"]
+filters = []
+"#
+        .parse()
+        .expect("test TOML");
         let result = validate_config(&value);
         assert!(!result.valid);
     }
