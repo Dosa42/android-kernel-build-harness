@@ -100,7 +100,7 @@ mod tests {
     fn embedded_schema_is_exact_expected_document() {
         let parsed: serde_json::Value = serde_json::from_str(CODEX_SCHEMA).expect("embedded schema must be valid JSON");
         assert_eq!(parsed.get("title").and_then(|v| v.as_str()), Some("ConfigToml"));
-        assert_eq!(line_count(), 6212);
-        assert_eq!(byte_count(), 181805);
+        assert_eq!(line_count(), 6444);
+        assert_eq!(byte_count(), 188324);
     }
 }
