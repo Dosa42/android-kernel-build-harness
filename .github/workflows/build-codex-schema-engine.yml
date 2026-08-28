@@ -52,9 +52,9 @@ jobs:
           curl --fail --silent --show-error --location \
             https://developers.openai.com/codex/config-schema.json \
             --output assets/config-schema.json
-          echo "affe54cce9b9945ffd32d322415ff4cc844c62068c1190be6355580be4ca9350  assets/config-schema.json" | sha256sum --check --strict
-          test "$(wc -l < assets/config-schema.json)" -eq 6211
-          test "$(wc -c < assets/config-schema.json)" -eq 181805
+          echo "2b1906bb9f854e503a96e2de47dbad7f069a1de3a929ca0e81e270cdce4dffea  assets/config-schema.json" | sha256sum --check --strict
+          test "$(wc -l < assets/config-schema.json)" -eq 6443
+          test "$(wc -c < assets/config-schema.json)" -eq 188324
 
       - name: Generate lockfile
         run: cargo generate-lockfile
@@ -89,7 +89,7 @@ jobs:
             echo "runner=${RUNNER_OS}/${RUNNER_ARCH}"
             rustc --version
             cargo --version
-            echo "schema_sha256=affe54cce9b9945ffd32d322415ff4cc844c62068c1190be6355580be4ca9350"
+            echo "schema_sha256=2b1906bb9f854e503a96e2de47dbad7f069a1de3a929ca0e81e270cdce4dffea"
             if test -f target/release/codex-schema-engine; then
               file target/release/codex-schema-engine
               sha256sum target/release/codex-schema-engine
